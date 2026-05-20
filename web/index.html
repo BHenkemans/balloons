@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Balloon Tracker</title>
+    <link rel="stylesheet" href="/dist/styles.css" />
+  </head>
+  <body class="min-h-screen bg-zinc-950 text-zinc-100">
+    <header
+      class="flex items-center justify-between border-b border-zinc-800 px-6 py-4"
+    >
+      <h1 class="flex items-center gap-2 text-lg font-bold">
+        <span>🎈</span><span>Balloon Tracker</span>
+      </h1>
+      <div id="status" class="flex items-center gap-2 text-sm text-zinc-400">
+        <span
+          id="status-dot"
+          class="h-2 w-2 rounded-full bg-zinc-500"
+        ></span>
+        <span id="status-text">Connecting…</span>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-5xl px-6 py-8">
+      <section class="mb-10">
+        <h2
+          class="mb-3 text-sm font-semibold tracking-wider text-zinc-300"
+        >
+          PENDING
+          <span id="pending-count" class="text-zinc-500">(0)</span>
+        </h2>
+        <div id="pending" class="flex flex-col gap-3"></div>
+        <p
+          id="pending-empty"
+          class="hidden text-sm italic text-zinc-500"
+        >
+          No pending balloons
+        </p>
+      </section>
+
+      <section>
+        <h2
+          class="mb-3 text-sm font-semibold tracking-wider text-zinc-300"
+        >
+          DELIVERED
+          <span id="delivered-count" class="text-zinc-500">(0)</span>
+        </h2>
+        <div id="delivered" class="flex flex-col gap-3"></div>
+        <p
+          id="delivered-empty"
+          class="text-sm italic text-zinc-500"
+        >
+          No delivered balloons yet
+        </p>
+      </section>
+    </main>
+
+    <script type="module" src="/dist/app.js"></script>
+  </body>
+</html>

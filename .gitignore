@@ -1,0 +1,9 @@
+.env
+
+/gen
+/web/src/gen
+
+/web/dist
+/bin
+
+node_modules
