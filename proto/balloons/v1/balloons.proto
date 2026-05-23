@@ -32,9 +32,11 @@ message StreamBalloonsResponse {
     KIND_UNSPECIFIED = 0;
     KIND_ADDED = 1;
     KIND_UPDATED = 2;
+    KIND_FREEZE = 3;
   }
   Kind kind = 1;
   Balloon balloon = 2;
+  bool frozen = 3;
 }
 
 message MarkDoneRequest {

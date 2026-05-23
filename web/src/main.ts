@@ -1,6 +1,6 @@
 import { createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
-import { BalloonService } from "./gen/balloons/v1/balloons_pb.js";
+import { BalloonService, StreamBalloonsResponse_Kind } from "./gen/balloons/v1/balloons_pb.js";
 import type { Balloon } from "./gen/balloons/v1/balloons_pb.js";
 
 const transport = createConnectTransport({ baseUrl: window.location.origin });
@@ -14,6 +14,7 @@ const deliveredEmptyEl = document.getElementById("delivered-empty")!;
 const deliveredCountEl = document.getElementById("delivered-count")!;
 const statusDot = document.getElementById("status-dot")!;
 const statusText = document.getElementById("status-text")!;
+const freezeBanner = document.getElementById("freeze-banner")!;
 
 const state = new Map<string, Balloon>();
 
@@ -104,6 +105,10 @@ function render() {
 async function stream() {
   for await (const ev of client.streamBalloons({})) {
     setStatus("connected");
+    if (ev.kind === StreamBalloonsResponse_Kind.FREEZE) {
+      freezeBanner.classList.toggle("hidden", !ev.frozen);
+      continue;
+    }
     if (!ev.balloon) continue;
     state.set(ev.balloon.id.toString(), ev.balloon);
     render();

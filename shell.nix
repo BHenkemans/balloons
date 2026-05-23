@@ -17,5 +17,8 @@ pkgs.mkShell {
 
     # Frontend build (esbuild via npm)
     nodejs_22
+
+    # Ticket rendering (printer subsystem)
+    typst
   ];
 }

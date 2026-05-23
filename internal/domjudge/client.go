@@ -14,11 +14,12 @@ import (
 )
 
 type Client struct {
-	baseURL   string
-	user      string
-	pass      string
-	contestID string
-	hc        *http.Client
+	baseURL      string
+	eventFeedURL string
+	user         string
+	pass         string
+	contestID    string
+	hc           *http.Client
 }
 
 func New(baseURL, user, pass, contestID string) *Client {
@@ -31,8 +32,16 @@ func New(baseURL, user, pass, contestID string) *Client {
 	}
 }
 
+// SetEventFeedURL overrides the base URL used by StreamEvents only. Other
+// endpoints (/balloons, /teams, /state, /balloons/{id}/done) continue to hit
+// baseURL. Intended for pointing the event-feed at a local mock during dev.
+func (c *Client) SetEventFeedURL(u string) {
+	c.eventFeedURL = u
+}
+
 type Balloon struct {
 	BalloonID      int64          `json:"balloonid"`
+	Time           string         `json:"time"`
 	ContestProblem ContestProblem `json:"contestproblem"`
 	Team           string         `json:"team"`
 	TeamID         string         `json:"teamid"`
@@ -45,11 +54,6 @@ type ContestProblem struct {
 	RGB   string `json:"rgb"`
 }
 
-type Award struct {
-	ID      string   `json:"id"`
-	TeamIDs []string `json:"team_ids"`
-}
-
 func (c *Client) ListBalloons(ctx context.Context) ([]Balloon, error) {
 	var out []Balloon
 	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/balloons", url.PathEscape(c.contestID)), &out); err != nil {
@@ -58,10 +62,52 @@ func (c *Client) ListBalloons(ctx context.Context) ([]Balloon, error) {
 	return out, nil
 }
 
-func (c *Client) ListAwards(ctx context.Context) ([]Award, error) {
-	var out []Award
-	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/awards", url.PathEscape(c.contestID)), &out); err != nil {
+type Team struct {
+	ID       string   `json:"id"`
+	GroupIDs []string `json:"group_ids"`
+}
+
+func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
+	var out []Team
+	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/teams", url.PathEscape(c.contestID)), &out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// Problem is the subset of DOMjudge's /contests/{cid}/problems response that
+// we care about. Used to populate the full problem-label strip on a ticket.
+type Problem struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	RGB   string `json:"rgb"`
+}
+
+func (c *Client) ListProblems(ctx context.Context) ([]Problem, error) {
+	var out []Problem
+	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/problems", url.PathEscape(c.contestID)), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// State mirrors the relevant fields of DOMjudge's /contests/{cid}/state. Each
+// field is a CLICS timestamp string when the event has occurred, or null
+// otherwise — so we treat them as *string.
+type State struct {
+	Frozen *string `json:"frozen"`
+	Thawed *string `json:"thawed"`
+}
+
+// Frozen reports whether the contest's scoreboard freeze is currently active.
+func (s State) FrozenNow() bool {
+	return s.Frozen != nil && s.Thawed == nil
+}
+
+func (c *Client) GetState(ctx context.Context) (State, error) {
+	var out State
+	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/state", url.PathEscape(c.contestID)), &out); err != nil {
+		return State{}, err
 	}
 	return out, nil
 }
@@ -93,8 +139,12 @@ func (c *Client) StreamEvents(ctx context.Context, types []string, fn func(line 
 	if len(types) > 0 {
 		q.Set("types", strings.Join(types, ","))
 	}
+	base := c.baseURL
+	if c.eventFeedURL != "" {
+		base = c.eventFeedURL
+	}
 	path := fmt.Sprintf("/api/v4/contests/%s/event-feed?%s", url.PathEscape(c.contestID), q.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 	if err != nil {
 		return err
 	}

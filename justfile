@@ -62,6 +62,15 @@ ping:
     curl -sfX POST http://localhost:8080/balloons.v1.BalloonService/ListBalloons \
       -H "Content-Type: application/json" -d '{}' | head -c 400; echo
 
+# Run the dev event-feed mock. Listens on :8090. Set
+# DOMJUDGE_EVENTFEED_URL=http://localhost:8090 in .env to wire the server to it.
+mockfeed:
+    go run ./cmd/mockfeed
+
+# Poke the mockfeed to emit one event line; balloon hub will refresh on it.
+trigger type="judgements":
+    curl -sfX POST "http://localhost:8090/trigger?type={{type}}"; echo
+
 # Delete generated and built artifacts.
 clean:
     rm -rf gen web/src/gen web/dist bin

@@ -4,19 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-Custom replacement for DOMjudge's built-in balloon tool, written for the GEHACK contest. The built-in tool doesn't surface a first-solve flag and can't drive a receipt printer; this tool exists to fix both. A future contest-area map will also consume data from this service. Receipt-printer and map integrations are deliberately out of scope for the current code.
+Custom replacement for DOMjudge's built-in balloon tool, written for the GEHACK contest. The built-in tool doesn't surface a first-solve flag and can't drive a receipt printer; this tool exists to fix both. A future contest-area map will also consume data from this service. The printer subsystem is abstracted (`internal/printer`) so the same hub can drive an IPP printer today and a receipt printer later; the map integration is still out of scope.
 
 ## Dev environment
 
 Everything (Go, buf, protoc plugins, Node, Tailwind) is pinned in `shell.nix`. Enter with `nix-shell`, or wrap one-off commands with `nix-shell --run "..."`. Commands below assume the shell is active.
 
-Required env vars (see `.env.example`): `DOMJUDGE_URL`, `DOMJUDGE_USER`, `DOMJUDGE_PASS`, `DOMJUDGE_CONTEST_ID`. Load with `set -a; source .env; set +a` before running the server. Optional: `ADDR` (default `:8080`).
+Required env vars (see `.env.example`): `DOMJUDGE_URL`, `DOMJUDGE_USER`, `DOMJUDGE_PASS`, `DOMJUDGE_CONTEST_ID`. Load with `set -a; source .env; set +a` before running the server. Optional: `ADDR` (default `:8080`), `HIDE_GROUP_IDS` (CSV of DOMjudge group ids whose balloons disappear entirely), `NO_FIRST_SOLVE_GROUP_IDS` (CSV of group ids whose teams still get balloons but never the first-solve flag), `PRINTER_KIND` (`noop` default, or `ipp`, or `escpos`), `PRINTER_IPP_URI` (full `ipp://host:port/queue` URI; required when `PRINTER_KIND=ipp`), `PRINTER_ESCPOS_ADDR` (`host:port` of the thermal printer's raw socket, typically `:9100`; required when `PRINTER_KIND=escpos`), `PRINTER_ESCPOS_WIDTH` (printer head width in dots, default `576` for 80mm/203dpi), `PRINTER_TEMPLATE` (default `templates/balloon.typ`), `STATE_DB` (path to the SQLite ticket-state file, default `balloons.db`), `DOMJUDGE_EVENTFEED_URL` (dev-only override that redirects only the event-feed stream — `/balloons`, `/teams`, `/state`, `/problems` still hit `DOMJUDGE_URL`).
 
 ## Common commands
 
-A `justfile` wraps everything. `just` lists recipes; the useful ones are `just bootstrap` (first-time setup), `just gen` (regen Go + TS from proto), `just build-web`, `just watch`, `just run`, `just fmt`, `just lint`, `just ping` (curl the server). `set dotenv-load` is on so `.env` is read automatically for any recipe.
+A `justfile` wraps everything. `just` lists recipes; the useful ones are `just bootstrap` (first-time setup), `just gen` (regen Go + TS from proto), `just build-web`, `just watch`, `just run`, `just fmt`, `just lint`, `just ping` (curl the server), `just mockfeed` (run the dev event-feed stand-in on `:8090`), and `just trigger [type]` (POST to the mock to emit one NDJSON event line; defaults to `judgements`). `set dotenv-load` is on so `.env` is read automatically for any recipe.
 
-There are no tests yet.
+Tests: `go test ./...`. So far only `internal/state` has a real test; everything else is exercised manually via the mockfeed flow in `docs/testing.md`.
 
 ## Architecture
 
@@ -24,11 +24,13 @@ There are no tests yet.
 
 **Hub pattern** (`internal/server/hub.go`) is the cache + fan-out:
 - `Run(ctx)` does an initial `refresh()` then spawns `runEventFeed()` and serializes subsequent refreshes off a buffered `trigger` channel.
-- `refresh()` fetches `/balloons` + `/awards` from DOMjudge, rebuilds the proto state, diffs against the previous map, and broadcasts `KIND_ADDED`/`KIND_UPDATED` events to all subscribers.
-- `runEventFeed()` holds a long-lived NDJSON read on `/api/v4/contests/{cid}/event-feed?stream=true&types=judgements,awards,balloons` and calls `TriggerRefresh()` on every line. Reconnect with exponential backoff up to 30s.
+- `refresh()` fetches `/balloons`, `/teams`, `/state`, and `/problems` from DOMjudge, applies group-based filters (hide + no-first-solve), rebuilds the proto state, diffs against the previous map, and broadcasts `KIND_ADDED`/`KIND_UPDATED` events to all subscribers. It also precomputes the contest's full label strip plus per-team delivered / in-delivery label sets up front so dispatched print goroutines don't need the hub lock.
+- `runEventFeed()` holds a long-lived NDJSON read on `/api/v4/contests/{cid}/event-feed?stream=true&types=judgements,balloons,state` and calls `TriggerRefresh()` on every line. Reconnect with exponential backoff up to 30s.
 - Subscribers get a snapshot + a buffered channel from `Subscribe()`. Slow subscribers get force-closed (they reconnect and pick up a fresh snapshot).
 
-`MarkDone` calls DOMjudge then `TriggerRefresh()` so the UI sees the change within one round-trip instead of waiting for the event-feed.
+`MarkDone` calls DOMjudge then `TriggerRefresh()` so the UI sees the change within one round-trip instead of waiting for the event-feed. It also calls `Store.RecordDelivered` so the local SQLite reflects delivery completion.
+
+**Printer abstraction** (`internal/printer`) is an interface (`Printer { Print(ctx, Ticket) error }`) with three implementations: `Noop` (logs only, default); `IPP` (renders `templates/balloon.typ` via the `typst` CLI into a PDF, then submits it to an IPP queue via `phin1x/go-ipp`); and `ESCPOS` (renders the same template to a PNG at a PPI chosen to match the configured dot width, Floyd-Steinberg dithers it to 1-bit, and streams the result as `GS v 0` raster chunks plus a partial-cut over a TCP raw socket — typically port 9100). The ESC/POS path assumes the Typst page width is 80mm (constant `pageWidthMM` in `escpos.go`); changing the template's `#let page-width` requires updating that constant. The hub fires `go h.print(ticket)` on every `KIND_ADDED` event for a non-done balloon. Reprints are gated by the **state store** (`internal/state`, a small SQLite table): `h.print` calls `Store.IsPrinted(id)` before printing and `Store.RecordPrinted(id)` after, so restarting the server never reprints already-printed balloons and concurrent refreshes can't double-print. Deleting `STATE_DB` resets the dedupe.
 
 **Frontend** is a single HTML page + bundled TS (`web/src/main.ts`). It opens a server-streaming `StreamBalloons` RPC and renders straight from event deltas (no `ListBalloons` call in the happy path). On stream error it reconnects with the same exponential backoff. State is a `Map<string, Balloon>` keyed by id-as-string.
 
@@ -36,17 +38,24 @@ There are no tests yet.
 
 These cost time to figure out — keep them in mind:
 
-- **First-solve is not in `/balloons`.** Derive from `/awards`: each award with `id` starting `first-to-solve-{problem_id}` carries the team(s) holding it. Key the lookup as `problem_id + "|" + team_id` (`buildFirstSolveSet` in `internal/server/server.go`).
-- **Award IDs use the problem's internal id, not the label.** `first-to-solve-covencomplications`, not `first-to-solve-C`. So look up against `ContestProblem.ID`, not `.Label`.
+- **First-solve must be derived from `/balloons` itself.** DOMjudge's `/awards` endpoint is empty during a live contest (it's only populated post-contest), so we can't use it. Per problem, the balloon with the earliest `time` is the first solve (`firstSolveIDs` in `internal/server/server.go`). The `time` field is a fixed-width seconds.nanoseconds string, so lexical compare is correct. Teams whose group is in `NO_FIRST_SOLVE_GROUP_IDS` are skipped — if a company team solves first, the next eligible team gets the flag.
+- **Team groups come from `/teams`, not `/balloons`.** The balloon JSON has `categoryid: null` even when the team has a category. Fetch `/api/v4/contests/{cid}/teams`, each team has a `group_ids` array. Filters (hide + no-first-solve) match if *any* of a team's `group_ids` is in the filter set.
 - **`done` is one-way.** DOMjudge only exposes `POST /balloons/{id}/done` — there is no unmark endpoint in the API. Current behavior matches that limitation; if undo becomes a requirement, track delivered state locally rather than reverse-engineering the admin web route.
 - **`team` is `{label}: {name}`.** DOMjudge prepends the team's label (number or string) to the display name. Stripped server-side in `toProto` with `^\S+:\s+`.
-- **Event-feed events are triggers, not deltas.** The code treats any event as "something changed, refetch and diff." Don't try to interpret event payloads — `/balloons` + `/awards` is canonical.
+- **Event-feed events are triggers, not deltas.** The code treats any event as "something changed, refetch and diff." Don't try to interpret event payloads — `/balloons`, `/teams`, and `/state` are canonical.
+- **Freeze detection comes from `/state`.** Scoreboard freeze is active when `frozen != null && thawed == null` (`State.FrozenNow` in `internal/domjudge/client.go`). The hub broadcasts a `KIND_FREEZE` event on transitions and on every new subscription so reloads pick up the current state.
 
 ## Proto / wire surface
 
-`proto/balloons/v1/balloons.proto` is deliberately minimal: 6 fields on `Balloon` (`id`, `problem_label`, `problem_rgb`, `team_name`, `done`, `first_solve`). The server holds more DOMjudge data internally but doesn't put it on the wire. Add fields when a consumer needs them, not preemptively.
+`proto/balloons/v1/balloons.proto` is deliberately minimal: 6 fields on `Balloon` (`id`, `problem_label`, `problem_rgb`, `team_name`, `done`, `first_solve`). `StreamBalloonsResponse` carries a `Kind` (`ADDED`/`UPDATED`/`FREEZE`) plus an optional `balloon` and a `frozen` bool used only on `KIND_FREEZE` events. The server holds more DOMjudge data internally but doesn't put it on the wire. Add fields when a consumer needs them, not preemptively.
 
 Generated code (`gen/` for Go, `web/src/gen/` for TS) is gitignored. Always run `buf generate` after editing the proto.
+
+## Dev / testing flow
+
+The real DOMjudge `/event-feed` is populated by its PHP `EventLogService`, so raw SQL inserts against the DB never produce a feed line and the hub never refreshes. `cmd/mockfeed` exists to bridge that: it serves a DOMjudge-shaped NDJSON event stream on `:8090` and emits one event per `POST /trigger`. Wire it in by setting `DOMJUDGE_EVENTFEED_URL=http://localhost:8090` — only the feed is overridden, all other reads still hit the real DOMjudge. The hub treats event payloads as opaque triggers (see gotcha above), so the mock's events only need to be well-formed.
+
+`docs/testing.md` is the playbook for inserting fake submissions/judgings/balloons via SQL and exercising the full flow (printer, first-solve, MarkDone) without solving real problems. Read that before manually testing balloon behavior.
 
 ## What's where
 
@@ -55,7 +64,12 @@ proto/balloons/v1/         schema (single file)
 gen/                       generated Go (gitignored)
 web/src/gen/               generated TS (gitignored)
 cmd/server/                main.go — env config + http.Server + hub.Run()
+cmd/mockfeed/              dev-only stand-in for DOMjudge's /event-feed (see docs/testing.md)
 internal/domjudge/         REST + event-feed client; mirrors DOMjudge JSON shapes
 internal/server/           connectRPC handlers + Hub
+internal/printer/          Printer interface + Noop and IPP impls
+internal/state/            SQLite-backed ticket-state store (printed_at, delivered_at) for reprint dedupe
+templates/                 Typst ticket templates (one per layout)
+docs/                      developer playbooks (testing.md = end-to-end balloon fake-injection)
 web/                       Tailwind v4 + esbuild + connect-web frontend
 ```

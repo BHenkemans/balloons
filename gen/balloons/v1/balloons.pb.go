@@ -27,6 +27,7 @@ const (
 	StreamBalloonsResponse_KIND_UNSPECIFIED StreamBalloonsResponse_Kind = 0
 	StreamBalloonsResponse_KIND_ADDED       StreamBalloonsResponse_Kind = 1
 	StreamBalloonsResponse_KIND_UPDATED     StreamBalloonsResponse_Kind = 2
+	StreamBalloonsResponse_KIND_FREEZE      StreamBalloonsResponse_Kind = 3
 )
 
 // Enum value maps for StreamBalloonsResponse_Kind.
@@ -35,11 +36,13 @@ var (
 		0: "KIND_UNSPECIFIED",
 		1: "KIND_ADDED",
 		2: "KIND_UPDATED",
+		3: "KIND_FREEZE",
 	}
 	StreamBalloonsResponse_Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED": 0,
 		"KIND_ADDED":       1,
 		"KIND_UPDATED":     2,
+		"KIND_FREEZE":      3,
 	}
 )
 
@@ -274,6 +277,7 @@ type StreamBalloonsResponse struct {
 	state         protoimpl.MessageState      `protogen:"open.v1"`
 	Kind          StreamBalloonsResponse_Kind `protobuf:"varint,1,opt,name=kind,proto3,enum=balloons.v1.StreamBalloonsResponse_Kind" json:"kind,omitempty"`
 	Balloon       *Balloon                    `protobuf:"bytes,2,opt,name=balloon,proto3" json:"balloon,omitempty"`
+	Frozen        bool                        `protobuf:"varint,3,opt,name=frozen,proto3" json:"frozen,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -320,6 +324,13 @@ func (x *StreamBalloonsResponse) GetBalloon() *Balloon {
 		return x.Balloon
 	}
 	return nil
+}
+
+func (x *StreamBalloonsResponse) GetFrozen() bool {
+	if x != nil {
+		return x.Frozen
+	}
+	return false
 }
 
 type MarkDoneRequest struct {
@@ -419,15 +430,17 @@ const file_balloons_v1_balloons_proto_rawDesc = "" +
 	"\x13ListBalloonsRequest\"H\n" +
 	"\x14ListBalloonsResponse\x120\n" +
 	"\bballoons\x18\x01 \x03(\v2\x14.balloons.v1.BalloonR\bballoons\"\x17\n" +
-	"\x15StreamBalloonsRequest\"\xc6\x01\n" +
+	"\x15StreamBalloonsRequest\"\xef\x01\n" +
 	"\x16StreamBalloonsResponse\x12<\n" +
 	"\x04kind\x18\x01 \x01(\x0e2(.balloons.v1.StreamBalloonsResponse.KindR\x04kind\x12.\n" +
-	"\aballoon\x18\x02 \x01(\v2\x14.balloons.v1.BalloonR\aballoon\">\n" +
+	"\aballoon\x18\x02 \x01(\v2\x14.balloons.v1.BalloonR\aballoon\x12\x16\n" +
+	"\x06frozen\x18\x03 \x01(\bR\x06frozen\"O\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\x0e\n" +
 	"\n" +
 	"KIND_ADDED\x10\x01\x12\x10\n" +
-	"\fKIND_UPDATED\x10\x02\"0\n" +
+	"\fKIND_UPDATED\x10\x02\x12\x0f\n" +
+	"\vKIND_FREEZE\x10\x03\"0\n" +
 	"\x0fMarkDoneRequest\x12\x1d\n" +
 	"\n" +
 	"balloon_id\x18\x01 \x01(\x03R\tballoonId\"\x12\n" +
