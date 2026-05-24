@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +17,11 @@ import (
 	"github.com/BHenkemans/balloons/internal/state"
 )
 
+// ErrBalloonNotFound is returned by Reprint when the requested id is not in
+// the hub's current view of DOMjudge (e.g. hidden by HIDE_GROUP_IDS or simply
+// stale on the client).
+var ErrBalloonNotFound = errors.New("balloon not found")
+
 type Hub struct {
 	dj      *domjudge.Client
 	printer printer.Printer
@@ -22,8 +30,12 @@ type Hub struct {
 	hideGroups         map[string]bool
 	noFirstSolveGroups map[string]bool
 
+	scanBaseURL string
+	loc         *time.Location
+
 	mu     sync.Mutex
 	state  map[int64]*balloonsv1.Balloon
+	last   snapshot // most recently applied snapshot; kept for reprint ticket data
 	frozen bool
 	subs   map[*subscriber]struct{}
 
@@ -34,13 +46,18 @@ type subscriber struct {
 	ch chan *balloonsv1.StreamBalloonsResponse
 }
 
-func NewHub(dj *domjudge.Client, p printer.Printer, store *state.Store, hideGroupIDs, noFirstSolveGroupIDs []string) *Hub {
+func NewHub(dj *domjudge.Client, p printer.Printer, store *state.Store, hideGroupIDs, noFirstSolveGroupIDs []string, scanBaseURL string, loc *time.Location) *Hub {
+	if loc == nil {
+		loc = time.Local
+	}
 	return &Hub{
 		dj:                 dj,
 		printer:            p,
 		store:              store,
 		hideGroups:         toSet(hideGroupIDs),
 		noFirstSolveGroups: toSet(noFirstSolveGroupIDs),
+		scanBaseURL:        strings.TrimRight(scanBaseURL, "/"),
+		loc:                loc,
 		state:              map[int64]*balloonsv1.Balloon{},
 		subs:               map[*subscriber]struct{}{},
 		trigger:            make(chan struct{}, 1),
@@ -106,6 +123,26 @@ func (h *Hub) print(t printer.Ticket) {
 	if err := h.store.RecordPrinted(t.BalloonID); err != nil {
 		log.Printf("print balloon %d: record: %v", t.BalloonID, err)
 	}
+}
+
+// Reprint clears the local "already printed" mark for this balloon and
+// re-dispatches the print goroutine using the most recently cached snapshot.
+// Returns ErrBalloonNotFound if the id isn't in the current view.
+func (h *Hub) Reprint(id int64) error {
+	h.mu.Lock()
+	b, ok := h.state[id]
+	if !ok {
+		h.mu.Unlock()
+		return ErrBalloonNotFound
+	}
+	t := h.ticketFor(b, h.last)
+	h.mu.Unlock()
+
+	if err := h.store.ClearPrinted(id); err != nil {
+		return err
+	}
+	go h.print(t)
+	return nil
 }
 
 func (h *Hub) TriggerRefresh() {
@@ -248,6 +285,7 @@ func (h *Hub) applySnapshot(snap snapshot) {
 
 	events := h.diffEvents(snap)
 	h.state = snap.balloons
+	h.last = snap
 	if snap.frozen != h.frozen {
 		h.frozen = snap.frozen
 		events = append(events, &balloonsv1.StreamBalloonsResponse{
@@ -277,7 +315,7 @@ func (h *Hub) diffEvents(snap snapshot) []*balloonsv1.StreamBalloonsResponse {
 				Balloon: b,
 			})
 			if !b.Done {
-				go h.print(ticketFor(b, snap))
+				go h.print(h.ticketFor(b, snap))
 			}
 		case !proto.Equal(prev, b):
 			events = append(events, &balloonsv1.StreamBalloonsResponse{
@@ -289,7 +327,7 @@ func (h *Hub) diffEvents(snap snapshot) []*balloonsv1.StreamBalloonsResponse {
 	return events
 }
 
-func ticketFor(b *balloonsv1.Balloon, snap snapshot) printer.Ticket {
+func (h *Hub) ticketFor(b *balloonsv1.Balloon, snap snapshot) printer.Ticket {
 	dj := snap.byID[b.Id]
 	return printer.Ticket{
 		BalloonID:    b.Id,
@@ -301,7 +339,8 @@ func ticketFor(b *balloonsv1.Balloon, snap snapshot) printer.Ticket {
 		AllProblems:  snap.allProblemLabels,
 		Delivered:    snap.deliveredByTeam[dj.TeamID],
 		InDelivery:   snap.inDeliveryByTeam[dj.TeamID],
-		IssuedAt:     time.Now(),
+		IssuedAt:     time.Now().In(h.loc),
+		ScanURL:      h.scanBaseURL + "/scan?id=" + strconv.FormatInt(b.Id, 10),
 	}
 }
 

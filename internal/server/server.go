@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"regexp"
 
@@ -36,6 +37,16 @@ func (s *Server) MarkDone(ctx context.Context, req *connect.Request[balloonsv1.M
 	}
 	s.Hub.TriggerRefresh()
 	return connect.NewResponse(&balloonsv1.MarkDoneResponse{}), nil
+}
+
+func (s *Server) Reprint(_ context.Context, req *connect.Request[balloonsv1.ReprintRequest]) (*connect.Response[balloonsv1.ReprintResponse], error) {
+	if err := s.Hub.Reprint(req.Msg.BalloonId); err != nil {
+		if errors.Is(err, ErrBalloonNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, err)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&balloonsv1.ReprintResponse{}), nil
 }
 
 func (s *Server) StreamBalloons(ctx context.Context, _ *connect.Request[balloonsv1.StreamBalloonsRequest], stream *connect.ServerStream[balloonsv1.StreamBalloonsResponse]) error {

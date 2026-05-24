@@ -79,6 +79,17 @@ func (s *Store) RecordPrinted(balloonID int64) error {
 	return nil
 }
 
+// ClearPrinted nulls printed_at for this balloon so the next print attempt is
+// allowed through. Used to support manual "reprint" requests for tickets that
+// were lost in transit. No-op if the row doesn't exist.
+func (s *Store) ClearPrinted(balloonID int64) error {
+	_, err := s.db.Exec(`UPDATE ticket_state SET printed_at=NULL WHERE balloon_id=?`, balloonID)
+	if err != nil {
+		return fmt.Errorf("state: ClearPrinted(%d): %w", balloonID, err)
+	}
+	return nil
+}
+
 // RecordDelivered sets delivered_at = now(), creating the row if needed. Called
 // after a successful MarkDone against DOMjudge.
 func (s *Store) RecordDelivered(balloonID int64) error {

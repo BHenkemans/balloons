@@ -76,23 +76,10 @@ func (p *IPP) Print(ctx context.Context, t Ticket) error {
 
 func (p *IPP) render(ctx context.Context, t Ticket) (string, error) {
 	out := filepath.Join(os.TempDir(), fmt.Sprintf("balloon-%d-%d.pdf", t.BalloonID, time.Now().UnixNano()))
-	issued := t.IssuedAt
-	if issued.IsZero() {
-		issued = time.Now()
-	}
-	cmd := exec.CommandContext(ctx, "typst", "compile",
-		"--input", "datetime="+issued.Format("02-01-2006 15:04"),
-		"--input", "ticket_id="+strconv.FormatInt(t.BalloonID, 10),
-		"--input", "problem="+t.ProblemLabel,
-		"--input", "color="+t.ProblemRGB,
-		"--input", "team_name="+t.TeamName,
-		"--input", "team_id="+t.TeamID,
-		"--input", "balloons="+strings.Join(t.AllProblems, ","),
-		"--input", "delivered="+strings.Join(t.Delivered, ","),
-		"--input", "in_delivery="+strings.Join(t.InDelivery, ","),
-		"--input", "first_solve="+strconv.FormatBool(t.FirstSolve),
-		p.template, out,
-	)
+	args := []string{"compile"}
+	args = append(args, typstInputs(t)...)
+	args = append(args, "--input", "theme=color", p.template, out)
+	cmd := exec.CommandContext(ctx, "typst", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

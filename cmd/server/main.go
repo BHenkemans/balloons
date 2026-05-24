@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,10 +28,6 @@ func main() {
 		mustEnv("DOMJUDGE_PASS"),
 		mustEnv("DOMJUDGE_CONTEST_ID"),
 	)
-	if u := os.Getenv("DOMJUDGE_EVENTFEED_URL"); u != "" {
-		log.Printf("event-feed override: %s", u)
-		dj.SetEventFeedURL(u)
-	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -46,9 +43,21 @@ func main() {
 	}
 	defer store.Close()
 
+	addr := config.Getenv("ADDR", ":8080")
+	scanBaseURL := resolveScanBaseURL(os.Getenv("SCAN_BASE_URL"), addr)
+	log.Printf("scan base URL: %s", scanBaseURL)
+
+	loc, err := resolveTZ(os.Getenv("CONTEST_TZ"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("ticket timezone: %s", loc)
+
 	hub := server.NewHub(dj, p, store,
 		config.ParseCSV(os.Getenv("HIDE_GROUP_IDS")),
 		config.ParseCSV(os.Getenv("NO_FIRST_SOLVE_GROUP_IDS")),
+		scanBaseURL,
+		loc,
 	)
 	go hub.Run(ctx)
 
@@ -57,9 +66,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
+	mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/scan.html")
+	})
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
-	addr := config.Getenv("ADDR", ":8080")
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
@@ -72,6 +83,46 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// resolveTZ parses an IANA timezone name (e.g. "Europe/Amsterdam") into a
+// *time.Location for ticket datetime formatting. Empty string returns
+// time.Local — fine on hosts that have their system TZ set correctly, but in
+// containers/systemd units where the process inherits UTC, set CONTEST_TZ
+// explicitly so ticket timestamps don't drift.
+func resolveTZ(name string) (*time.Location, error) {
+	if name == "" {
+		return time.Local, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("CONTEST_TZ %q: %w", name, err)
+	}
+	return loc, nil
+}
+
+// resolveScanBaseURL returns the configured SCAN_BASE_URL when set, otherwise
+// derives one from os.Hostname() and addr so the QR on every ticket still
+// points somewhere reachable on the contest LAN. The derived URL is only
+// useful when the printing host is reachable from the runner's phone by
+// hostname — set SCAN_BASE_URL explicitly when that's not the case (e.g.
+// behind a reverse proxy, or when the host has a public DNS name).
+func resolveScanBaseURL(env, addr string) string {
+	if env != "" {
+		return strings.TrimRight(env, "/")
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "localhost"
+	}
+	// addr is in `:port` or `host:port` form; we want the port suffix.
+	portSuffix := addr
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		portSuffix = addr[i:]
+	} else {
+		portSuffix = ":" + addr
+	}
+	return "http://" + host + portSuffix
 }
 
 func mustEnv(k string) string {

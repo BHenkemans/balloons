@@ -14,12 +14,11 @@ import (
 )
 
 type Client struct {
-	baseURL      string
-	eventFeedURL string
-	user         string
-	pass         string
-	contestID    string
-	hc           *http.Client
+	baseURL   string
+	user      string
+	pass      string
+	contestID string
+	hc        *http.Client
 }
 
 func New(baseURL, user, pass, contestID string) *Client {
@@ -30,13 +29,6 @@ func New(baseURL, user, pass, contestID string) *Client {
 		contestID: contestID,
 		hc:        &http.Client{Timeout: 10 * time.Second},
 	}
-}
-
-// SetEventFeedURL overrides the base URL used by StreamEvents only. Other
-// endpoints (/balloons, /teams, /state, /balloons/{id}/done) continue to hit
-// baseURL. Intended for pointing the event-feed at a local mock during dev.
-func (c *Client) SetEventFeedURL(u string) {
-	c.eventFeedURL = u
 }
 
 type Balloon struct {
@@ -75,16 +67,11 @@ func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
 	return out, nil
 }
 
-// Problem is the subset of DOMjudge's /contests/{cid}/problems response that
-// we care about. Used to populate the full problem-label strip on a ticket.
-type Problem struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-	RGB   string `json:"rgb"`
-}
-
-func (c *Client) ListProblems(ctx context.Context) ([]Problem, error) {
-	var out []Problem
+// ListProblems returns the subset of /contests/{cid}/problems we care about.
+// Reuses the ContestProblem shape (same ID/Label/RGB fields as the embedded
+// problem inside a Balloon).
+func (c *Client) ListProblems(ctx context.Context) ([]ContestProblem, error) {
+	var out []ContestProblem
 	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/problems", url.PathEscape(c.contestID)), &out); err != nil {
 		return nil, err
 	}
@@ -139,12 +126,8 @@ func (c *Client) StreamEvents(ctx context.Context, types []string, fn func(line 
 	if len(types) > 0 {
 		q.Set("types", strings.Join(types, ","))
 	}
-	base := c.baseURL
-	if c.eventFeedURL != "" {
-		base = c.eventFeedURL
-	}
 	path := fmt.Sprintf("/api/v4/contests/%s/event-feed?%s", url.PathEscape(c.contestID), q.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}

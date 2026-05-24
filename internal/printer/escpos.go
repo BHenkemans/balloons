@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	_ "image/png"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -17,17 +18,34 @@ import (
 
 // ESCPOS renders the ticket as a PNG via Typst and pushes it to a thermal
 // printer as ESC/POS raster data over a TCP raw socket (typically port 9100).
-// The Typst template is rendered at a PPI chosen so an 80mm page lands at
-// exactly the configured dot width.
+//
+// The render pipeline supersamples the Typst output (so each printer dot is
+// the area-average of supersample² source pixels) and converts the result to
+// 1-bit with a chroma-aware ink density: saturated colors become solid black
+// ink instead of dithering to noise, while grayscale photo regions go through
+// Floyd-Steinberg as usual. This avoids the speckled-blob look that simple
+// dithering produces on colored fills.
 type ESCPOS struct {
 	addr     string // host:port for TCP raw printing
 	template string
 	width    int // target raster width in dots
 }
 
-// pageWidthMM matches the Typst template's `#let page-width = 80mm`. Changing
-// it here without updating the template will misalign the rendered PNG.
-const pageWidthMM = 80.0
+// Thermal printers in this family are 203 DPI. The Typst page width is
+// derived as width / DPI so each rendered pixel maps cleanly to a printer
+// dot at supersample=1.
+const targetDPI = 203.0
+
+// supersample is how many source pixels per output dot, per axis. 2 captures
+// Typst's anti-aliasing without quadrupling rasterization cost; 3+ shows
+// diminishing returns on a 203 DPI printer.
+const supersample = 2
+
+// chromaThreshold is the maximum sRGB chroma (max channel - min channel)
+// that a pixel may have before it's treated as "colored ink" and forced to
+// solid black rather than dithered. 0.15 keeps faint anti-aliased edges in
+// the photo path but catches the brand colors used in the template.
+const chromaThreshold = 0.15
 
 // NewESCPOS validates the address and returns a printer. width is the printer
 // head width in dots; 576 fits the common 80mm/203dpi thermal printer.
@@ -75,30 +93,26 @@ func (p *ESCPOS) Print(ctx context.Context, t Ticket) error {
 	return nil
 }
 
-// render compiles the Typst template to a PNG sized to the printer width.
-// PPI is chosen so the 80mm page renders to exactly `width` pixels.
+// render compiles the Typst template to a PNG that is supersample× wider
+// than the printer's dot count. The page width (in mm) is derived from the
+// dot width / targetDPI so the rendered pixel grid lines up with printer
+// dots after downsampling.
 func (p *ESCPOS) render(ctx context.Context, t Ticket) (string, error) {
 	out := filepath.Join(os.TempDir(), fmt.Sprintf("balloon-%d-%d.png", t.BalloonID, time.Now().UnixNano()))
-	issued := t.IssuedAt
-	if issued.IsZero() {
-		issued = time.Now()
-	}
-	ppi := float64(p.width) * 25.4 / pageWidthMM
-	cmd := exec.CommandContext(ctx, "typst", "compile",
+	pageWidthMM := float64(p.width) * 25.4 / targetDPI
+	ppi := targetDPI * float64(supersample)
+	args := []string{
+		"compile",
 		"--format", "png",
 		"--ppi", strconv.FormatFloat(ppi, 'f', 3, 64),
-		"--input", "datetime="+issued.Format("02-01-2006 15:04"),
-		"--input", "ticket_id="+strconv.FormatInt(t.BalloonID, 10),
-		"--input", "problem="+t.ProblemLabel,
-		"--input", "color="+t.ProblemRGB,
-		"--input", "team_name="+t.TeamName,
-		"--input", "team_id="+t.TeamID,
-		"--input", "balloons="+strings.Join(t.AllProblems, ","),
-		"--input", "delivered="+strings.Join(t.Delivered, ","),
-		"--input", "in_delivery="+strings.Join(t.InDelivery, ","),
-		"--input", "first_solve="+strconv.FormatBool(t.FirstSolve),
+	}
+	args = append(args, typstInputs(t)...)
+	args = append(args,
+		"--input", "theme=thermal",
+		"--input", "page_width_mm="+strconv.FormatFloat(pageWidthMM, 'f', 3, 64),
 		p.template, out,
 	)
+	cmd := exec.CommandContext(ctx, "typst", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -125,10 +139,17 @@ func encodeESCPOS(img image.Image, targetWidth int) []byte {
 	bw, w, h := imageTo1Bit(img, targetWidth)
 
 	var buf bytes.Buffer
-	buf.Write([]byte{0x1b, 0x40}) // ESC @ — initialize
+	buf.Write([]byte{0x1b, 0x40})       // ESC @ — initialize
+	buf.Write([]byte{0x1b, 0x33, 0x00}) // ESC 3 0 — line spacing to 0 so chunked GS v 0 rasters butt against each other
 
 	rowBytes := (w + 7) / 8
-	const chunkRows = 128 // GS v 0 is reliable in small chunks across firmwares
+	// chunkRows is kept just under the most-conservative firmware limit
+	// (2047 rows per GS v 0 on some older Epson clones). Bigger is better:
+	// many printers add a small paper advance between consecutive GS v 0
+	// raster commands regardless of `ESC 3 0`, so every chunk boundary is a
+	// potential visible gap. 1024 is a good balance — for a typical
+	// 150–250mm receipt that's 1–2 chunks instead of 10+.
+	const chunkRows = 1024
 	for y0 := 0; y0 < h; y0 += chunkRows {
 		rows := chunkRows
 		if y0+rows > h {
@@ -161,34 +182,96 @@ func encodeESCPOS(img image.Image, targetWidth int) []byte {
 	return buf.Bytes()
 }
 
-// imageTo1Bit converts img to a 1-bit raster of width targetWidth (cropping
-// or right-padding with white as needed) using Floyd-Steinberg dithering on
-// the luminance channel. true = black (printed).
+// imageTo1Bit converts img to a 1-bit raster of width targetWidth using a
+// three-stage pipeline: area-filter downsample (the supersample step), per
+// pixel chroma-aware ink density, then Floyd-Steinberg dither on the density
+// field. true = black (printed).
+//
+// The downsample averages in linear-light space so anti-aliased edges and
+// gradients don't get the gamma-darkening artefact of averaging sRGB values
+// directly. Chroma detection keeps the dither pattern off solid colored
+// fills (problem letter, first-solve banner) by snapping them to either
+// solid black or — for very light colors like pale yellow — back to the
+// luminance path.
 func imageTo1Bit(img image.Image, targetWidth int) (pixels []bool, width, height int) {
 	src := img.Bounds()
 	srcW, srcH := src.Dx(), src.Dy()
 	width = targetWidth
-	height = srcH
-	if width <= 0 {
+	if width <= 0 || width > srcW {
 		width = srcW
 	}
 
-	// Luminance buffer in [0,1]; outside the source image we leave white (1).
-	lum := make([]float64, width*height)
-	for y := 0; y < height; y++ {
-		row := y * width
-		for x := 0; x < width; x++ {
-			if x < srcW {
-				r, g, b, a := img.At(src.Min.X+x, src.Min.Y+y).RGBA()
-				// Composite against white so transparent PNG areas don't print.
-				af := float64(a) / 65535.0
-				rf := float64(r)/65535.0*af + (1 - af)
-				gf := float64(g)/65535.0*af + (1 - af)
-				bf := float64(b)/65535.0*af + (1 - af)
-				lum[row+x] = 0.299*rf + 0.587*gf + 0.114*bf
-			} else {
-				lum[row+x] = 1
+	scale := float64(srcW) / float64(width)
+	height = int(math.Round(float64(srcH) / scale))
+	if height < 1 {
+		height = 1
+	}
+
+	density := make([]float64, width*height)
+	for oy := 0; oy < height; oy++ {
+		sy0 := int(float64(oy) * scale)
+		sy1 := int(float64(oy+1) * scale)
+		if sy1 > srcH {
+			sy1 = srcH
+		}
+		if sy1 <= sy0 {
+			sy1 = sy0 + 1
+		}
+		for ox := 0; ox < width; ox++ {
+			sx0 := int(float64(ox) * scale)
+			sx1 := int(float64(ox+1) * scale)
+			if sx1 > srcW {
+				sx1 = srcW
 			}
+			if sx1 <= sx0 {
+				sx1 = sx0 + 1
+			}
+
+			var rLin, gLin, bLin float64
+			var count float64
+			for y := sy0; y < sy1; y++ {
+				for x := sx0; x < sx1; x++ {
+					r, g, b, a := img.At(src.Min.X+x, src.Min.Y+y).RGBA()
+					af := float64(a) / 65535.0
+					// Composite over white in sRGB space so transparent
+					// regions print white rather than black.
+					sr := float64(r)/65535.0*af + (1 - af)
+					sg := float64(g)/65535.0*af + (1 - af)
+					sb := float64(b)/65535.0*af + (1 - af)
+					rLin += srgbToLinear(sr)
+					gLin += srgbToLinear(sg)
+					bLin += srgbToLinear(sb)
+					count++
+				}
+			}
+			rLin /= count
+			gLin /= count
+			bLin /= count
+
+			// Back to sRGB for chroma; chroma is a perceptual property and
+			// is more meaningful in display space than in linear light.
+			rs := linearToSrgb(rLin)
+			gs := linearToSrgb(gLin)
+			bs := linearToSrgb(bLin)
+			maxC := math.Max(rs, math.Max(gs, bs))
+			minC := math.Min(rs, math.Min(gs, bs))
+			chroma := maxC - minC
+
+			// Perceptual brightness from linear luminance (Rec. 709) lifted
+			// through the sRGB transfer.
+			lumLinear := 0.2126*rLin + 0.7152*gLin + 0.0722*bLin
+			perceived := linearToSrgb(lumLinear)
+
+			var ink float64
+			if chroma > chromaThreshold && perceived < 0.7 {
+				// Saturated, non-pale color → treat as solid ink. Light
+				// colors (pale yellow, pastel pink) fall through to the
+				// luminance path so they don't print as a black blob.
+				ink = 1
+			} else {
+				ink = 1 - perceived
+			}
+			density[oy*width+ox] = ink
 		}
 	}
 
@@ -196,28 +279,42 @@ func imageTo1Bit(img image.Image, targetWidth int) (pixels []bool, width, height
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			i := y*width + x
-			old := lum[i]
+			old := density[i]
 			var newVal float64
-			if old < 0.5 {
-				newVal = 0
+			if old > 0.5 {
+				newVal = 1
 				pixels[i] = true
 			} else {
-				newVal = 1
+				newVal = 0
 			}
 			err := old - newVal
 			if x+1 < width {
-				lum[i+1] += err * 7 / 16
+				density[i+1] += err * 7 / 16
 			}
 			if y+1 < height {
 				if x > 0 {
-					lum[i+width-1] += err * 3 / 16
+					density[i+width-1] += err * 3 / 16
 				}
-				lum[i+width] += err * 5 / 16
+				density[i+width] += err * 5 / 16
 				if x+1 < width {
-					lum[i+width+1] += err * 1 / 16
+					density[i+width+1] += err * 1 / 16
 				}
 			}
 		}
 	}
 	return pixels, width, height
+}
+
+func srgbToLinear(c float64) float64 {
+	if c <= 0.04045 {
+		return c / 12.92
+	}
+	return math.Pow((c+0.055)/1.055, 2.4)
+}
+
+func linearToSrgb(c float64) float64 {
+	if c <= 0.0031308 {
+		return c * 12.92
+	}
+	return 1.055*math.Pow(c, 1/2.4) - 0.055
 }

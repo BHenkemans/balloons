@@ -8,6 +8,7 @@ service BalloonService {
   rpc ListBalloons(ListBalloonsRequest) returns (ListBalloonsResponse) {}
   rpc StreamBalloons(StreamBalloonsRequest) returns (stream StreamBalloonsResponse) {}
   rpc MarkDone(MarkDoneRequest) returns (MarkDoneResponse) {}
+  rpc Reprint(ReprintRequest) returns (ReprintResponse) {}
 }
 
 message Balloon {
@@ -44,3 +45,9 @@ message MarkDoneRequest {
 }
 
 message MarkDoneResponse {}
+
+message ReprintRequest {
+  int64 balloon_id = 1;
+}
+
+message ReprintResponse {}

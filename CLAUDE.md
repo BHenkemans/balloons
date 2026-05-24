@@ -10,13 +10,13 @@ Custom replacement for DOMjudge's built-in balloon tool, written for the GEHACK 
 
 Everything (Go, buf, protoc plugins, Node, Tailwind) is pinned in `shell.nix`. Enter with `nix-shell`, or wrap one-off commands with `nix-shell --run "..."`. Commands below assume the shell is active.
 
-Required env vars (see `.env.example`): `DOMJUDGE_URL`, `DOMJUDGE_USER`, `DOMJUDGE_PASS`, `DOMJUDGE_CONTEST_ID`. Load with `set -a; source .env; set +a` before running the server. Optional: `ADDR` (default `:8080`), `HIDE_GROUP_IDS` (CSV of DOMjudge group ids whose balloons disappear entirely), `NO_FIRST_SOLVE_GROUP_IDS` (CSV of group ids whose teams still get balloons but never the first-solve flag), `PRINTER_KIND` (`noop` default, or `ipp`, or `escpos`), `PRINTER_IPP_URI` (full `ipp://host:port/queue` URI; required when `PRINTER_KIND=ipp`), `PRINTER_ESCPOS_ADDR` (`host:port` of the thermal printer's raw socket, typically `:9100`; required when `PRINTER_KIND=escpos`), `PRINTER_ESCPOS_WIDTH` (printer head width in dots, default `576` for 80mm/203dpi), `PRINTER_TEMPLATE` (default `templates/balloon.typ`), `STATE_DB` (path to the SQLite ticket-state file, default `balloons.db`), `DOMJUDGE_EVENTFEED_URL` (dev-only override that redirects only the event-feed stream — `/balloons`, `/teams`, `/state`, `/problems` still hit `DOMJUDGE_URL`).
+Required env vars (see `.env.example`): `DOMJUDGE_URL`, `DOMJUDGE_USER`, `DOMJUDGE_PASS`, `DOMJUDGE_CONTEST_ID`. Load with `set -a; source .env; set +a` before running the server. Optional: `ADDR` (default `:8080`), `HIDE_GROUP_IDS` (CSV of DOMjudge group ids whose balloons disappear entirely), `NO_FIRST_SOLVE_GROUP_IDS` (CSV of group ids whose teams still get balloons but never the first-solve flag), `PRINTER_KIND` (`noop` default, or `ipp`, or `escpos`), `PRINTER_IPP_URI` (full `ipp://host:port/queue` URI; required when `PRINTER_KIND=ipp`), `PRINTER_ESCPOS_ADDR` (`host:port` of the thermal printer's raw socket, typically `:9100`; required when `PRINTER_KIND=escpos`), `PRINTER_ESCPOS_WIDTH` (printer head width in dots, default `576` for 80mm/203dpi), `PRINTER_TEMPLATE` (default `templates/balloon.typ` — the same template handles both themes, driven by an `--input theme=color|thermal` flag the printer driver supplies), `CONTEST_TZ` (IANA timezone name like `Europe/Amsterdam` used to render the ticket datetime; defaults to the server process's `time.Local` — set explicitly when running in containers/systemd to avoid UTC drift), `STATE_DB` (path to the SQLite ticket-state file, default `balloons.db`), `SCAN_BASE_URL` (public base URL used to build the per-ticket QR code; when unset, falls back to `http://<os.Hostname()><ADDR>` so the QR still prints on a contest LAN — set explicitly when behind a reverse proxy or when the runner's phone can't resolve the host by name).
 
 ## Common commands
 
-A `justfile` wraps everything. `just` lists recipes; the useful ones are `just bootstrap` (first-time setup), `just gen` (regen Go + TS from proto), `just build-web`, `just watch`, `just run`, `just fmt`, `just lint`, `just ping` (curl the server), `just mockfeed` (run the dev event-feed stand-in on `:8090`), and `just trigger [type]` (POST to the mock to emit one NDJSON event line; defaults to `judgements`). `set dotenv-load` is on so `.env` is read automatically for any recipe.
+A `justfile` wraps everything. `just` lists recipes; the useful ones are `just bootstrap` (first-time setup), `just gen` (regen Go + TS from proto), `just build-web`, `just watch`, `just run`, `just fmt`, `just lint`, and `just ping` (curl the server). `set dotenv-load` is on so `.env` is read automatically for any recipe.
 
-Tests: `go test ./...`. So far only `internal/state` has a real test; everything else is exercised manually via the mockfeed flow in `docs/testing.md`.
+Tests: `go test ./...`. Coverage is light (`internal/state` and `internal/server` have unit tests); the rest is exercised by pointing the server at a live DOMjudge contest. To manually re-trigger a print without waiting for a real submission, use the **Reprint** button in the UI — it clears the local `printed_at` row for that balloon and re-dispatches the print goroutine.
 
 ## Architecture
 
@@ -30,9 +30,11 @@ Tests: `go test ./...`. So far only `internal/state` has a real test; everything
 
 `MarkDone` calls DOMjudge then `TriggerRefresh()` so the UI sees the change within one round-trip instead of waiting for the event-feed. It also calls `Store.RecordDelivered` so the local SQLite reflects delivery completion.
 
-**Printer abstraction** (`internal/printer`) is an interface (`Printer { Print(ctx, Ticket) error }`) with three implementations: `Noop` (logs only, default); `IPP` (renders `templates/balloon.typ` via the `typst` CLI into a PDF, then submits it to an IPP queue via `phin1x/go-ipp`); and `ESCPOS` (renders the same template to a PNG at a PPI chosen to match the configured dot width, Floyd-Steinberg dithers it to 1-bit, and streams the result as `GS v 0` raster chunks plus a partial-cut over a TCP raw socket — typically port 9100). The ESC/POS path assumes the Typst page width is 80mm (constant `pageWidthMM` in `escpos.go`); changing the template's `#let page-width` requires updating that constant. The hub fires `go h.print(ticket)` on every `KIND_ADDED` event for a non-done balloon. Reprints are gated by the **state store** (`internal/state`, a small SQLite table): `h.print` calls `Store.IsPrinted(id)` before printing and `Store.RecordPrinted(id)` after, so restarting the server never reprints already-printed balloons and concurrent refreshes can't double-print. Deleting `STATE_DB` resets the dedupe.
+**Printer abstraction** (`internal/printer`) is an interface (`Printer { Print(ctx, Ticket) error }`) with three implementations: `Noop` (logs only, default); `IPP` (renders `templates/balloon.typ` via the `typst` CLI into a PDF, then submits it to an IPP queue via `phin1x/go-ipp`); and `ESCPOS` (renders the same template with `--input theme=thermal` at 2× supersampling, box-filters down to the configured dot width, converts each pixel to 1-bit using a chroma-aware ink-density pass — saturated colors snap to solid black, near-grayscale goes through Floyd-Steinberg — then streams the result as `GS v 0` raster chunks plus a partial-cut over a TCP raw socket, typically port 9100). The Typst page width is derived as `width / 203dpi` and passed to the template via `--input page_width_mm=...`; the template reads that input so adjusting `PRINTER_ESCPOS_WIDTH` does not require template edits. The shared `typstInputs` helper (`internal/printer/typst.go`) builds the common `--input k=v` pairs both backends pass to `typst compile`. If you swap to a printer with a different head DPI, change `targetDPI` in `escpos.go`. The hub fires `go h.print(ticket)` on every `KIND_ADDED` event for a non-done balloon. Reprints are gated by the **state store** (`internal/state`, a small SQLite table): `h.print` calls `Store.IsPrinted(id)` before printing and `Store.RecordPrinted(id)` after, so restarting the server never reprints already-printed balloons and concurrent refreshes can't double-print. Deleting `STATE_DB` resets the dedupe.
 
 **Frontend** is a single HTML page + bundled TS (`web/src/main.ts`). It opens a server-streaming `StreamBalloons` RPC and renders straight from event deltas (no `ListBalloons` call in the happy path). On stream error it reconnects with the same exponential backoff. State is a `Map<string, Balloon>` keyed by id-as-string.
+
+**Runner scan flow** lives in `web/scan.html`, served at `GET /scan?id=<balloon_id>`. It's intentionally a standalone page (no shared bundle, no connect-web SDK) so a phone with weak signal can load it fast — it calls `ListBalloons` and `MarkDone` directly as plain Connect-protocol JSON POSTs (`fetch("/balloons.v1.BalloonService/MarkDone", ...)`). The QR on every printed ticket encodes `<SCAN_BASE_URL>/scan?id=<n>`; on load the page shows "Delivered ✓" immediately and a 5-second Undo button, then fires `MarkDone` once the timer expires. The 5-second buffer matters because DOMjudge's `done` is one-way (see gotchas) — once we POST the mark, we can't take it back, so the only honest "undo" is "cancel before we commit." A balloon that's already `done` at scan time shows "Already delivered" and no countdown.
 
 ## DOMjudge integration gotchas
 
@@ -51,12 +53,6 @@ These cost time to figure out — keep them in mind:
 
 Generated code (`gen/` for Go, `web/src/gen/` for TS) is gitignored. Always run `buf generate` after editing the proto.
 
-## Dev / testing flow
-
-The real DOMjudge `/event-feed` is populated by its PHP `EventLogService`, so raw SQL inserts against the DB never produce a feed line and the hub never refreshes. `cmd/mockfeed` exists to bridge that: it serves a DOMjudge-shaped NDJSON event stream on `:8090` and emits one event per `POST /trigger`. Wire it in by setting `DOMJUDGE_EVENTFEED_URL=http://localhost:8090` — only the feed is overridden, all other reads still hit the real DOMjudge. The hub treats event payloads as opaque triggers (see gotcha above), so the mock's events only need to be well-formed.
-
-`docs/testing.md` is the playbook for inserting fake submissions/judgings/balloons via SQL and exercising the full flow (printer, first-solve, MarkDone) without solving real problems. Read that before manually testing balloon behavior.
-
 ## What's where
 
 ```
@@ -64,12 +60,10 @@ proto/balloons/v1/         schema (single file)
 gen/                       generated Go (gitignored)
 web/src/gen/               generated TS (gitignored)
 cmd/server/                main.go — env config + http.Server + hub.Run()
-cmd/mockfeed/              dev-only stand-in for DOMjudge's /event-feed (see docs/testing.md)
 internal/domjudge/         REST + event-feed client; mirrors DOMjudge JSON shapes
 internal/server/           connectRPC handlers + Hub
-internal/printer/          Printer interface + Noop and IPP impls
+internal/printer/          Printer interface + Noop, IPP, and ESCPOS impls
 internal/state/            SQLite-backed ticket-state store (printed_at, delivered_at) for reprint dedupe
-templates/                 Typst ticket templates (one per layout)
-docs/                      developer playbooks (testing.md = end-to-end balloon fake-injection)
+templates/                 Typst ticket template (one file, themed by --input theme=)
 web/                       Tailwind v4 + esbuild + connect-web frontend
 ```

@@ -21,4 +21,11 @@ pkgs.mkShell {
     # Ticket rendering (printer subsystem)
     typst
   ];
+
+  shellHook = ''
+    if [ -z "$IN_NIX_ZSH" ] && [ -x "$(command -v zsh)" ]; then
+      export IN_NIX_ZSH=1
+      exec zsh
+    fi
+  '';
 }

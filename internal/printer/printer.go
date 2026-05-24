@@ -28,6 +28,12 @@ type Ticket struct {
 
 	// IssuedAt is the timestamp printed on the ticket.
 	IssuedAt time.Time
+
+	// ScanURL is the runner-facing URL encoded into the ticket's QR code
+	// (typically `<SCAN_BASE_URL>/scan?id=<BalloonID>`). Empty if the server
+	// has no SCAN_BASE_URL configured; templates render a placeholder in
+	// that case.
+	ScanURL string
 }
 
 type Printer interface {
