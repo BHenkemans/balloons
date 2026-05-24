@@ -20,6 +20,10 @@ const statusText = document.getElementById("status-text")!;
 const freezeBanner = document.getElementById("freeze-banner")!;
 const themeToggle = document.getElementById("theme-toggle")!;
 const themeToggleIcon = document.getElementById("theme-toggle-icon")!;
+const scanForm = document.getElementById("scan-form") as HTMLFormElement;
+const scanInput = document.getElementById("scan-input") as HTMLInputElement;
+const scanHint = document.getElementById("scan-hint")!;
+const toastStack = document.getElementById("toast-stack")!;
 
 const state = new Map<string, Balloon>();
 
@@ -161,6 +165,136 @@ function render() {
   for (const b of delivered) deliveredEl.appendChild(row(b));
   deliveredEmptyEl.classList.toggle("hidden", delivered.length !== 0);
 }
+
+function parseScan(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return s;
+  try {
+    const u = new URL(s);
+    const id = u.searchParams.get("id");
+    if (id && /^\d+$/.test(id)) return id;
+  } catch {}
+  const m = s.match(/[?&]id=(\d+)/);
+  return m ? m[1] : null;
+}
+
+function flashHint(msg: string, kind: "ok" | "err") {
+  scanHint.textContent = msg;
+  scanHint.classList.remove("hidden", "text-emerald-400", "text-red-400");
+  scanHint.classList.add(kind === "ok" ? "text-emerald-400" : "text-red-400");
+  window.setTimeout(() => scanHint.classList.add("hidden"), 2500);
+}
+
+const UNDO_MS = 4000;
+
+function showDeliverToast(b: Balloon) {
+  const toast = document.createElement("div");
+  toast.className =
+    "flex items-start gap-3 rounded-lg border border-emerald-700/50 bg-emerald-950/90 px-4 py-3 text-sm text-emerald-100 shadow-lg backdrop-blur light:border-emerald-300 light:bg-emerald-50 light:text-emerald-900";
+
+  const ball = document.createElement("div");
+  ball.className =
+    "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow ring-1 ring-black/20";
+  ball.style.background = b.problemRgb || "#888";
+  ball.textContent = b.problemLabel || "?";
+  toast.appendChild(ball);
+
+  const body = document.createElement("div");
+  body.className = "min-w-0 flex-1";
+  const title = document.createElement("div");
+  title.className = "truncate font-semibold";
+  title.textContent = `Delivering: ${b.teamName}`;
+  body.appendChild(title);
+  const sub = document.createElement("div");
+  sub.className = "text-xs text-emerald-300/80 light:text-emerald-700";
+  sub.textContent = `Problem ${b.problemLabel}`;
+  body.appendChild(sub);
+  toast.appendChild(body);
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className =
+    "shrink-0 rounded-md border border-emerald-700 bg-emerald-900/40 px-2 py-1 text-xs font-medium hover:bg-emerald-900/70 light:border-emerald-400 light:bg-white light:text-emerald-800 light:hover:bg-emerald-100";
+  cancelBtn.textContent = `Cancel (${Math.ceil(UNDO_MS / 1000)}s)`;
+  toast.appendChild(cancelBtn);
+
+  toastStack.appendChild(toast);
+
+  let cancelled = false;
+  const startedAt = Date.now();
+  const tick = window.setInterval(() => {
+    const remaining = UNDO_MS - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      window.clearInterval(tick);
+      return;
+    }
+    cancelBtn.textContent = `Cancel (${Math.ceil(remaining / 1000)}s)`;
+  }, 200);
+
+  cancelBtn.onclick = () => {
+    cancelled = true;
+    window.clearInterval(tick);
+    toast.remove();
+    flashHint(`Cancelled ${b.teamName}`, "err");
+  };
+
+  window.setTimeout(async () => {
+    window.clearInterval(tick);
+    if (cancelled) return;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "delivering…";
+    try {
+      await client.markDone({ balloonId: b.id });
+      toast.remove();
+    } catch (err) {
+      console.error("markDone:", err);
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "retry";
+      cancelBtn.onclick = () => {
+        toast.remove();
+        showDeliverToast(b);
+      };
+    }
+  }, UNDO_MS);
+}
+
+function handleScan(raw: string) {
+  const id = parseScan(raw);
+  if (!id) {
+    flashHint("Unrecognized scan", "err");
+    return;
+  }
+  const b = state.get(id);
+  if (!b) {
+    flashHint(`Unknown balloon #${id}`, "err");
+    return;
+  }
+  if (b.done) {
+    flashHint(`Already delivered: ${b.teamName}`, "err");
+    return;
+  }
+  showDeliverToast(b);
+}
+
+scanForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = scanInput.value;
+  scanInput.value = "";
+  handleScan(v);
+});
+
+// Keep the scan field focused so hand scanners (which act as keyboards)
+// always land in the right place. Buttons still receive clicks because the
+// click fires before the refocus runs.
+function focusScan() {
+  if (document.activeElement !== scanInput) scanInput.focus();
+}
+focusScan();
+scanInput.addEventListener("blur", () => {
+  window.setTimeout(focusScan, 0);
+});
+window.addEventListener("focus", focusScan);
 
 async function stream() {
   for await (const ev of client.streamBalloons({})) {
