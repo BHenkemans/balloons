@@ -39,11 +39,26 @@ type Hub struct {
 	frozen bool
 	subs   map[*subscriber]struct{}
 
+	// Runner-side streams: each connected runner phone gets a runnerSub, the
+	// admin panel gets a rosterSub. Multiple runnerSubs per id are allowed
+	// (e.g. runner has two tabs open).
+	runnerSubs map[int64]map[*runnerSub]struct{}
+	rosterSubs map[*rosterSub]struct{}
+
 	trigger chan struct{}
 }
 
 type subscriber struct {
 	ch chan *balloonsv1.StreamBalloonsResponse
+}
+
+type runnerSub struct {
+	runnerID int64
+	ch       chan *balloonsv1.WatchRunnerStateResponse
+}
+
+type rosterSub struct {
+	ch chan *balloonsv1.StreamRunnersResponse
 }
 
 func NewHub(dj *domjudge.Client, p printer.Printer, store *state.Store, hideGroupIDs, noFirstSolveGroupIDs []string, scanBaseURL string, loc *time.Location) *Hub {
@@ -60,6 +75,8 @@ func NewHub(dj *domjudge.Client, p printer.Printer, store *state.Store, hideGrou
 		loc:                loc,
 		state:              map[int64]*balloonsv1.Balloon{},
 		subs:               map[*subscriber]struct{}{},
+		runnerSubs:         map[int64]map[*runnerSub]struct{}{},
+		rosterSubs:         map[*rosterSub]struct{}{},
 		trigger:            make(chan struct{}, 1),
 	}
 }
@@ -167,19 +184,30 @@ func (h *Hub) Run(ctx context.Context) {
 }
 
 func (h *Hub) runEventFeed(ctx context.Context) {
-	backoff := 2 * time.Second
-	const maxBackoff = 30 * time.Second
+	const (
+		initialBackoff = 2 * time.Second
+		maxBackoff     = 30 * time.Second
+		// Reset backoff if the stream stayed up at least this long — a stable
+		// connection that drops briefly should not inherit the previous outage's
+		// climbed-up retry interval.
+		stableThreshold = 30 * time.Second
+	)
+	backoff := initialBackoff
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		log.Printf("event-feed: connecting")
+		start := time.Now()
 		err := h.dj.StreamEvents(ctx, []string{"judgements", "balloons", "state"}, func(_ []byte) error {
 			h.TriggerRefresh()
 			return nil
 		})
 		if ctx.Err() != nil {
 			return
+		}
+		if time.Since(start) > stableThreshold {
+			backoff = initialBackoff
 		}
 		log.Printf("event-feed: disconnected: %v (retry in %s)", err, backoff)
 		select {
@@ -202,7 +230,9 @@ type snapshot struct {
 	allProblemLabels []string
 	deliveredByTeam  map[string][]string
 	inDeliveryByTeam map[string][]string
-	frozen           bool
+	// Locations come from /teams. Empty string when DOMjudge doesn't have one.
+	teamLocations map[string]string
+	frozen        bool
 }
 
 func (h *Hub) refresh(ctx context.Context) {
@@ -213,59 +243,102 @@ func (h *Hub) refresh(ctx context.Context) {
 	h.applySnapshot(snap)
 }
 
+// djInputs bundles the four DOMjudge fetches one refresh cycle needs.
+type djInputs struct {
+	balloons []domjudge.Balloon
+	teams    []domjudge.Team
+	state    domjudge.State
+	problems []domjudge.ContestProblem
+}
+
+// fetchDOMjudgeInputs pulls the four endpoints buildSnapshot needs. Returns
+// ok=false on any error; the error is logged and the caller skips the refresh.
+func (h *Hub) fetchDOMjudgeInputs(ctx context.Context) (djInputs, bool) {
+	balloons, err := h.dj.ListBalloons(ctx)
+	if err != nil {
+		log.Printf("refresh: ListBalloons: %v", err)
+		return djInputs{}, false
+	}
+	teams, err := h.dj.ListTeams(ctx)
+	if err != nil {
+		log.Printf("refresh: ListTeams: %v", err)
+		return djInputs{}, false
+	}
+	state, err := h.dj.GetState(ctx)
+	if err != nil {
+		log.Printf("refresh: GetState: %v", err)
+		return djInputs{}, false
+	}
+	problems, err := h.dj.ListProblems(ctx)
+	if err != nil {
+		log.Printf("refresh: ListProblems: %v", err)
+		return djInputs{}, false
+	}
+	return djInputs{balloons: balloons, teams: teams, state: state, problems: problems}, true
+}
+
+// indexTeams turns a /teams response into the two lookup maps buildSnapshot
+// needs: group memberships (for filters and first-solve) and locations (for
+// the runner-facing assignment view).
+func indexTeams(teams []domjudge.Team) (groups map[string][]string, locations map[string]string) {
+	groups = make(map[string][]string, len(teams))
+	locations = make(map[string]string, len(teams))
+	for _, t := range teams {
+		groups[t.ID] = t.GroupIDs
+		locations[t.ID] = t.Location
+	}
+	return groups, locations
+}
+
+// filterVisible drops balloons whose team is in HIDE_GROUP_IDS.
+func filterVisible(balloons []domjudge.Balloon, teamGroups map[string][]string, hide map[string]bool) []domjudge.Balloon {
+	out := make([]domjudge.Balloon, 0, len(balloons))
+	for _, b := range balloons {
+		if anyInSet(teamGroups[b.TeamID], hide) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
 // buildSnapshot fetches all four DOMjudge endpoints and derives the per-refresh
 // state (visible balloons, first-solve set, per-team delivery sets, ticket
 // strip). Returns ok=false on any fetch error — the error is logged and the
 // caller leaves the existing hub state untouched.
 func (h *Hub) buildSnapshot(ctx context.Context) (snapshot, bool) {
-	balloons, err := h.dj.ListBalloons(ctx)
-	if err != nil {
-		log.Printf("refresh: ListBalloons: %v", err)
+	in, ok := h.fetchDOMjudgeInputs(ctx)
+	if !ok {
 		return snapshot{}, false
 	}
-	teams, err := h.dj.ListTeams(ctx)
-	if err != nil {
-		log.Printf("refresh: ListTeams: %v", err)
-		return snapshot{}, false
-	}
-	state, err := h.dj.GetState(ctx)
-	if err != nil {
-		log.Printf("refresh: GetState: %v", err)
-		return snapshot{}, false
-	}
-	problems, err := h.dj.ListProblems(ctx)
-	if err != nil {
-		log.Printf("refresh: ListProblems: %v", err)
-		return snapshot{}, false
-	}
-
-	teamGroups := make(map[string][]string, len(teams))
-	for _, t := range teams {
-		teamGroups[t.ID] = t.GroupIDs
-	}
-
-	visible := make([]domjudge.Balloon, 0, len(balloons))
-	for _, b := range balloons {
-		if anyInSet(teamGroups[b.TeamID], h.hideGroups) {
-			continue
-		}
-		visible = append(visible, b)
-	}
-
+	teamGroups, teamLocations := indexTeams(in.teams)
+	visible := filterVisible(in.balloons, teamGroups, h.hideGroups)
 	firstSolve := firstSolveIDs(visible, teamGroups, h.noFirstSolveGroups)
+
+	// Preserve assigned_runner_name across refreshes — buildSnapshot rebuilds
+	// the proto from DOMjudge, which doesn't know about our local assignments.
+	assignedNames, err := h.store.ActiveAssignedRunnerNames()
+	if err != nil {
+		log.Printf("refresh: ActiveAssignedRunnerNames: %v", err)
+		assignedNames = map[int64]string{}
+	}
+
 	snap := snapshot{
 		balloons:         make(map[int64]*balloonsv1.Balloon, len(visible)),
 		byID:             make(map[int64]domjudge.Balloon, len(visible)),
-		allProblemLabels: make([]string, len(problems)),
-		deliveredByTeam:  make(map[string][]string, len(teams)),
-		inDeliveryByTeam: make(map[string][]string, len(teams)),
-		frozen:           state.FrozenNow(),
+		allProblemLabels: make([]string, len(in.problems)),
+		deliveredByTeam:  make(map[string][]string, len(in.teams)),
+		inDeliveryByTeam: make(map[string][]string, len(in.teams)),
+		teamLocations:    teamLocations,
+		frozen:           in.state.FrozenNow(),
 	}
-	for i, p := range problems {
+	for i, p := range in.problems {
 		snap.allProblemLabels[i] = p.Label
 	}
 	for _, b := range visible {
-		snap.balloons[b.BalloonID] = toProto(b, firstSolve)
+		p := toProto(b, firstSolve)
+		p.AssignedRunnerName = assignedNames[b.BalloonID]
+		snap.balloons[b.BalloonID] = p
 		snap.byID[b.BalloonID] = b
 		if b.Done {
 			snap.deliveredByTeam[b.TeamID] = append(snap.deliveredByTeam[b.TeamID], b.ContestProblem.Label)
@@ -293,10 +366,12 @@ func (h *Hub) applySnapshot(snap snapshot) {
 			Frozen: snap.frozen,
 		})
 	}
-	if len(events) == 0 {
-		return
+	if len(events) > 0 {
+		h.broadcast(events)
 	}
-	h.broadcast(events)
+	// New balloons may have appeared in this refresh; try to assign them.
+	// tryDispatchLocked is cheap when there's nothing to do.
+	h.tryDispatchLocked()
 }
 
 // diffEvents compares snap.balloons against the existing hub state and returns

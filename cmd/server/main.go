@@ -61,13 +61,20 @@ func main() {
 	)
 	go hub.Run(ctx)
 
-	svc := &server.Server{Hub: hub, DJ: dj, Store: store}
+	cookieMode := server.ParseCookieSecureMode(os.Getenv("COOKIE_SECURE"))
+	svc := &server.Server{Hub: hub, DJ: dj, Store: store, CookieMode: cookieMode}
 	path, handler := balloonsv1connect.NewBalloonServiceHandler(svc)
 
 	mux := http.NewServeMux()
-	mux.Handle(path, handler)
+	// WithRequestScheme stamps the request context with "http" / "https" so
+	// connectRPC handlers can issue Secure cookies only when the inbound
+	// request was actually TLS (or proxied with X-Forwarded-Proto: https).
+	mux.Handle(path, server.WithRequestScheme(handler))
 	mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "web/scan.html")
+	})
+	mux.HandleFunc("/runner", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "web/runner.html")
 	})
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 

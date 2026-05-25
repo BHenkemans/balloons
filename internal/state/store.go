@@ -31,6 +31,31 @@ CREATE TABLE IF NOT EXISTS ticket_state (
     printed_at   TEXT,
     delivered_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS runners (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    session_token   TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    last_seen_at    TEXT NOT NULL,
+    available_since TEXT
+);
+
+CREATE TABLE IF NOT EXISTS assignments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    balloon_id       INTEGER NOT NULL,
+    runner_id        INTEGER NOT NULL,
+    state            TEXT NOT NULL,
+    assigned_at      TEXT NOT NULL,
+    delivered_at     TEXT,
+    cancelled_at     TEXT,
+    cancelled_reason TEXT,
+    FOREIGN KEY (runner_id) REFERENCES runners(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_balloon ON assignments (balloon_id) WHERE state = 'assigned';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_runner ON assignments (runner_id) WHERE state = 'assigned';
+CREATE INDEX IF NOT EXISTS idx_assignments_runner ON assignments (runner_id);
 `
 
 // Open opens (or creates) the SQLite database at path and ensures the schema

@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "build:css": "tailwindcss -i src/styles.css -o dist/styles.css --minify",
-    "build:js": "esbuild src/main.ts --bundle --format=esm --target=es2022 --outfile=dist/app.js",
+    "build:js": "esbuild src/main.ts src/runner.ts --bundle --format=esm --target=es2022 --outdir=dist",
     "build": "npm run build:css && npm run build:js",
     "watch:css": "tailwindcss -i src/styles.css -o dist/styles.css --watch",
-    "watch:js": "esbuild src/main.ts --bundle --format=esm --target=es2022 --outfile=dist/app.js --watch",
+    "watch:js": "esbuild src/main.ts src/runner.ts --bundle --format=esm --target=es2022 --outdir=dist --watch",
     "watch": "concurrently -n css,js -c cyan,green \"npm:watch:css\" \"npm:watch:js\""
   },
   "dependencies": {

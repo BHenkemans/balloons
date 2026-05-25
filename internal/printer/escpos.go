@@ -161,12 +161,12 @@ func encodeESCPOS(img image.Image, targetWidth int) []byte {
 			byte(rowBytes & 0xff), byte(rowBytes >> 8),
 			byte(rows & 0xff), byte(rows >> 8),
 		})
-		for ry := 0; ry < rows; ry++ {
+		for ry := range rows {
 			rowStart := (y0 + ry) * w
-			for xb := 0; xb < rowBytes; xb++ {
+			for xb := range rowBytes {
 				var b byte
 				base := xb * 8
-				for bit := 0; bit < 8; bit++ {
+				for bit := range 8 {
 					x := base + bit
 					if x < w && bw[rowStart+x] {
 						b |= 1 << (7 - bit)
@@ -194,115 +194,129 @@ func encodeESCPOS(img image.Image, targetWidth int) []byte {
 // solid black or — for very light colors like pale yellow — back to the
 // luminance path.
 func imageTo1Bit(img image.Image, targetWidth int) (pixels []bool, width, height int) {
-	src := img.Bounds()
+	width, height = targetDimensions(img.Bounds(), targetWidth)
+	density := computeDensity(img, width, height)
+	pixels = floydSteinberg(density, width, height)
+	return pixels, width, height
+}
+
+// targetDimensions returns the output (width, height) that preserves the
+// source aspect ratio while honoring the requested width. height is at least 1.
+func targetDimensions(src image.Rectangle, targetWidth int) (width, height int) {
 	srcW, srcH := src.Dx(), src.Dy()
 	width = targetWidth
 	if width <= 0 || width > srcW {
 		width = srcW
 	}
-
 	scale := float64(srcW) / float64(width)
-	height = int(math.Round(float64(srcH) / scale))
-	if height < 1 {
-		height = 1
-	}
+	height = max(int(math.Round(float64(srcH)/scale)), 1)
+	return width, height
+}
 
+// computeDensity area-averages img into a width×height ink-density field
+// (0=white, 1=black) using chroma-aware compositing — saturated colors snap to
+// solid black instead of dithering to a noisy mid-tone.
+func computeDensity(img image.Image, width, height int) []float64 {
+	src := img.Bounds()
+	srcW, srcH := src.Dx(), src.Dy()
+	scale := float64(srcW) / float64(width)
 	density := make([]float64, width*height)
-	for oy := 0; oy < height; oy++ {
-		sy0 := int(float64(oy) * scale)
-		sy1 := int(float64(oy+1) * scale)
-		if sy1 > srcH {
-			sy1 = srcH
-		}
-		if sy1 <= sy0 {
-			sy1 = sy0 + 1
-		}
-		for ox := 0; ox < width; ox++ {
-			sx0 := int(float64(ox) * scale)
-			sx1 := int(float64(ox+1) * scale)
-			if sx1 > srcW {
-				sx1 = srcW
-			}
-			if sx1 <= sx0 {
-				sx1 = sx0 + 1
-			}
-
-			var rLin, gLin, bLin float64
-			var count float64
-			for y := sy0; y < sy1; y++ {
-				for x := sx0; x < sx1; x++ {
-					r, g, b, a := img.At(src.Min.X+x, src.Min.Y+y).RGBA()
-					af := float64(a) / 65535.0
-					// Composite over white in sRGB space so transparent
-					// regions print white rather than black.
-					sr := float64(r)/65535.0*af + (1 - af)
-					sg := float64(g)/65535.0*af + (1 - af)
-					sb := float64(b)/65535.0*af + (1 - af)
-					rLin += srgbToLinear(sr)
-					gLin += srgbToLinear(sg)
-					bLin += srgbToLinear(sb)
-					count++
-				}
-			}
-			rLin /= count
-			gLin /= count
-			bLin /= count
-
-			// Back to sRGB for chroma; chroma is a perceptual property and
-			// is more meaningful in display space than in linear light.
-			rs := linearToSrgb(rLin)
-			gs := linearToSrgb(gLin)
-			bs := linearToSrgb(bLin)
-			maxC := math.Max(rs, math.Max(gs, bs))
-			minC := math.Min(rs, math.Min(gs, bs))
-			chroma := maxC - minC
-
-			// Perceptual brightness from linear luminance (Rec. 709) lifted
-			// through the sRGB transfer.
-			lumLinear := 0.2126*rLin + 0.7152*gLin + 0.0722*bLin
-			perceived := linearToSrgb(lumLinear)
-
-			var ink float64
-			if chroma > chromaThreshold && perceived < 0.7 {
-				// Saturated, non-pale color → treat as solid ink. Light
-				// colors (pale yellow, pastel pink) fall through to the
-				// luminance path so they don't print as a black blob.
-				ink = 1
-			} else {
-				ink = 1 - perceived
-			}
-			density[oy*width+ox] = ink
+	for oy := range height {
+		sy0, sy1 := sampleSpan(oy, scale, srcH)
+		for ox := range width {
+			sx0, sx1 := sampleSpan(ox, scale, srcW)
+			density[oy*width+ox] = inkAt(img, src, sx0, sx1, sy0, sy1)
 		}
 	}
+	return density
+}
 
-	pixels = make([]bool, width*height)
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+// sampleSpan maps an output coordinate to the [lo, hi) source-pixel range it
+// area-averages over. Clamps hi to srcMax and guarantees hi > lo.
+func sampleSpan(outCoord int, scale float64, srcMax int) (lo, hi int) {
+	lo = int(float64(outCoord) * scale)
+	hi = min(int(float64(outCoord+1)*scale), srcMax)
+	if hi <= lo {
+		hi = lo + 1
+	}
+	return lo, hi
+}
+
+// inkAt computes the ink density of one output pixel by averaging the source
+// region in linear-light sRGB. Saturated mid-or-darker colors are forced to
+// solid ink; pale or near-grayscale pixels fall through to luminance.
+func inkAt(img image.Image, src image.Rectangle, sx0, sx1, sy0, sy1 int) float64 {
+	var rLin, gLin, bLin, count float64
+	for y := sy0; y < sy1; y++ {
+		for x := sx0; x < sx1; x++ {
+			r, g, b, a := img.At(src.Min.X+x, src.Min.Y+y).RGBA()
+			af := float64(a) / 65535.0
+			// Composite over white so transparent regions print white.
+			sr := float64(r)/65535.0*af + (1 - af)
+			sg := float64(g)/65535.0*af + (1 - af)
+			sb := float64(b)/65535.0*af + (1 - af)
+			rLin += srgbToLinear(sr)
+			gLin += srgbToLinear(sg)
+			bLin += srgbToLinear(sb)
+			count++
+		}
+	}
+	rLin /= count
+	gLin /= count
+	bLin /= count
+
+	// Chroma is perceptual — compute it in display space.
+	rs := linearToSrgb(rLin)
+	gs := linearToSrgb(gLin)
+	bs := linearToSrgb(bLin)
+	chroma := math.Max(rs, math.Max(gs, bs)) - math.Min(rs, math.Min(gs, bs))
+
+	lumLinear := 0.2126*rLin + 0.7152*gLin + 0.0722*bLin
+	perceived := linearToSrgb(lumLinear)
+
+	if chroma > chromaThreshold && perceived < 0.7 {
+		return 1
+	}
+	return 1 - perceived
+}
+
+// floydSteinberg dithers density (modified in-place as the error diffuses) to
+// a 1-bit raster of the same dimensions. true = black.
+func floydSteinberg(density []float64, width, height int) []bool {
+	pixels := make([]bool, width*height)
+	for y := range height {
+		for x := range width {
 			i := y*width + x
 			old := density[i]
 			var newVal float64
 			if old > 0.5 {
 				newVal = 1
 				pixels[i] = true
-			} else {
-				newVal = 0
 			}
-			err := old - newVal
-			if x+1 < width {
-				density[i+1] += err * 7 / 16
-			}
-			if y+1 < height {
-				if x > 0 {
-					density[i+width-1] += err * 3 / 16
-				}
-				density[i+width] += err * 5 / 16
-				if x+1 < width {
-					density[i+width+1] += err * 1 / 16
-				}
-			}
+			diffuseError(density, x, y, width, height, old-newVal)
 		}
 	}
-	return pixels, width, height
+	return pixels
+}
+
+// diffuseError spreads the per-pixel quantization error to the standard
+// Floyd-Steinberg neighbours (7/16 right, 3/16 below-left, 5/16 below,
+// 1/16 below-right), clipped at the image boundary.
+func diffuseError(density []float64, x, y, width, height int, err float64) {
+	i := y*width + x
+	if x+1 < width {
+		density[i+1] += err * 7 / 16
+	}
+	if y+1 >= height {
+		return
+	}
+	if x > 0 {
+		density[i+width-1] += err * 3 / 16
+	}
+	density[i+width] += err * 5 / 16
+	if x+1 < width {
+		density[i+width+1] += err * 1 / 16
+	}
 }
 
 func srgbToLinear(c float64) float64 {

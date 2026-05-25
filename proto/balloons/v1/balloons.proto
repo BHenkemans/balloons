@@ -9,6 +9,21 @@ service BalloonService {
   rpc StreamBalloons(StreamBalloonsRequest) returns (stream StreamBalloonsResponse) {}
   rpc MarkDone(MarkDoneRequest) returns (MarkDoneResponse) {}
   rpc Reprint(ReprintRequest) returns (ReprintResponse) {}
+
+  // Runner-facing (cookie-authed except RequestRunnerSession).
+  rpc RequestRunnerSession(RequestRunnerSessionRequest) returns (RequestRunnerSessionResponse) {}
+  rpc WatchRunnerState(WatchRunnerStateRequest) returns (stream WatchRunnerStateResponse) {}
+  rpc SetRunnerAvailable(SetRunnerAvailableRequest) returns (SetRunnerAvailableResponse) {}
+  rpc CompleteAssignment(CompleteAssignmentRequest) returns (CompleteAssignmentResponse) {}
+  rpc ReadyForNext(ReadyForNextRequest) returns (ReadyForNextResponse) {}
+
+  // Admin-facing.
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse) {}
+  rpc StreamRunners(StreamRunnersRequest) returns (stream StreamRunnersResponse) {}
+  rpc AdmitRunner(AdmitRunnerRequest) returns (AdmitRunnerResponse) {}
+  rpc RejectRunner(RejectRunnerRequest) returns (RejectRunnerResponse) {}
+  rpc ForceReturnAssignment(ForceReturnAssignmentRequest) returns (ForceReturnAssignmentResponse) {}
+  rpc KickRunner(KickRunnerRequest) returns (KickRunnerResponse) {}
 }
 
 message Balloon {
@@ -18,6 +33,8 @@ message Balloon {
   string team_name = 4;
   bool done = 5;
   bool first_solve = 6;
+  // Set when the balloon currently has an active assignment. Empty otherwise.
+  string assigned_runner_name = 7;
 }
 
 message ListBalloonsRequest {}
@@ -51,3 +68,135 @@ message ReprintRequest {
 }
 
 message ReprintResponse {}
+
+// --- Runner-facing -----------------------------------------------------------
+
+// Status reflects what the runner is doing right now. The server is the source
+// of truth; the phone just renders.
+enum RunnerStatus {
+  RUNNER_STATUS_UNSPECIFIED = 0;
+  RUNNER_STATUS_PENDING_ADMIT = 1;
+  RUNNER_STATUS_IDLE = 2;
+  RUNNER_STATUS_AVAILABLE = 3;
+  RUNNER_STATUS_BUSY = 4;
+  // Runner has marked their current balloon delivered and is waiting to ack
+  // "ready for next" (or "take a break") before becoming eligible again.
+  RUNNER_STATUS_DELIVERED_PENDING_ACK = 5;
+  RUNNER_STATUS_OFFLINE = 6;
+  RUNNER_STATUS_REJECTED = 7;
+}
+
+message Runner {
+  int64 id = 1;
+  string name = 2;
+  RunnerStatus status = 3;
+  // RFC3339 timestamps; empty when not set.
+  string created_at = 4;
+  string last_seen_at = 5;
+  string available_since = 6;
+  // Snapshot of the active assignment if any. Empty for non-busy runners.
+  Assignment current_assignment = 7;
+}
+
+message Assignment {
+  int64 id = 1;
+  int64 balloon_id = 2;
+  string problem_label = 3;
+  string problem_rgb = 4;
+  string team_name = 5;
+  string team_location = 6;
+  bool first_solve = 7;
+  string assigned_at = 8;
+}
+
+message RequestRunnerSessionRequest {
+  string name = 1;
+}
+
+message RequestRunnerSessionResponse {
+  Runner runner = 1;
+}
+
+message WatchRunnerStateRequest {}
+
+// Emitted on every status change for the connected runner (and once on
+// subscribe with the current state).
+message WatchRunnerStateResponse {
+  Runner runner = 1;
+  // Optional human-readable note ("admin delivered the balloon you were
+  // working on"). Empty for plain state-change events.
+  string note = 2;
+}
+
+message SetRunnerAvailableRequest {
+  bool available = 1;
+}
+
+message SetRunnerAvailableResponse {
+  Runner runner = 1;
+}
+
+message CompleteAssignmentRequest {
+  int64 assignment_id = 1;
+}
+
+message CompleteAssignmentResponse {
+  Runner runner = 1;
+}
+
+message ReadyForNextRequest {}
+
+message ReadyForNextResponse {
+  Runner runner = 1;
+}
+
+// --- Admin-facing ------------------------------------------------------------
+
+message ListRunnersRequest {}
+
+message ListRunnersResponse {
+  repeated Runner runners = 1;
+}
+
+message StreamRunnersRequest {}
+
+// Emitted whenever any runner changes (status flip, new assignment, kicked).
+// The full updated runner is included; UI replaces by id.
+message StreamRunnersResponse {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_UPSERT = 1;
+    KIND_REMOVED = 2;
+    // Sent once on subscribe with the full roster, then incremental events.
+    KIND_SNAPSHOT = 3;
+  }
+  Kind kind = 1;
+  Runner runner = 2;
+  repeated Runner snapshot = 3;
+}
+
+message AdmitRunnerRequest {
+  int64 runner_id = 1;
+}
+
+message AdmitRunnerResponse {
+  Runner runner = 1;
+}
+
+message RejectRunnerRequest {
+  int64 runner_id = 1;
+}
+
+message RejectRunnerResponse {}
+
+message ForceReturnAssignmentRequest {
+  int64 assignment_id = 1;
+}
+
+message ForceReturnAssignmentResponse {}
+
+message KickRunnerRequest {
+  int64 runner_id = 1;
+}
+
+message KickRunnerResponse {}

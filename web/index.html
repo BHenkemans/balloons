@@ -90,6 +90,49 @@
                 class="fixed right-6 top-6 z-50 flex w-80 flex-col gap-2"
             ></div>
 
+            <section id="pending-admit-section" class="mb-8 hidden">
+                <h2
+                    class="mb-3 text-sm font-semibold tracking-wider text-amber-300 light:text-amber-700"
+                >
+                    PENDING ADMISSIONS
+                    <span
+                        id="pending-admit-count"
+                        class="text-zinc-500 light:text-zinc-400"
+                        >(0)</span
+                    >
+                </h2>
+                <div
+                    id="pending-admit"
+                    class="flex flex-col gap-2"
+                ></div>
+            </section>
+
+            <section id="roster-section" class="mb-10">
+                <h2
+                    class="mb-3 text-sm font-semibold tracking-wider text-zinc-300 light:text-zinc-700"
+                >
+                    RUNNERS
+                    <span
+                        id="roster-count"
+                        class="text-zinc-500 light:text-zinc-400"
+                        >(0)</span
+                    >
+                    <a
+                        href="/runner"
+                        target="_blank"
+                        class="ml-2 text-xs font-normal text-emerald-400 hover:underline light:text-emerald-700"
+                        >Open runner page ↗</a
+                    >
+                </h2>
+                <div id="roster" class="flex flex-col gap-2"></div>
+                <p
+                    id="roster-empty"
+                    class="text-sm italic text-zinc-500 light:text-zinc-400"
+                >
+                    No active runners
+                </p>
+            </section>
+
             <section class="mb-10">
                 <h2
                     class="mb-3 text-sm font-semibold tracking-wider text-zinc-300 light:text-zinc-700"
@@ -131,6 +174,6 @@
             </section>
         </main>
 
-        <script type="module" src="/dist/app.js"></script>
+        <script type="module" src="/dist/main.js"></script>
     </body>
 </html>

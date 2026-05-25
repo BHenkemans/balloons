@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Balloon Runner</title>
+        <link rel="stylesheet" href="/dist/styles.css" />
+        <script>
+            (function () {
+                try {
+                    if (localStorage.getItem("theme") === "light") {
+                        document.documentElement.classList.add("light");
+                    }
+                } catch (_) {}
+            })();
+        </script>
+    </head>
+    <body
+        class="min-h-screen bg-zinc-950 text-zinc-100 light:bg-zinc-50 light:text-zinc-900"
+    >
+        <main class="mx-auto flex min-h-screen max-w-md flex-col px-5 py-6">
+            <header class="mb-4 flex items-center justify-between">
+                <h1 class="flex items-center gap-2 text-lg font-bold">
+                    <span>🎈</span><span>Runner</span>
+                </h1>
+                <div
+                    id="status"
+                    class="flex items-center gap-2 text-xs text-zinc-400 light:text-zinc-600"
+                >
+                    <span
+                        id="status-dot"
+                        class="h-2 w-2 rounded-full bg-zinc-500"
+                    ></span>
+                    <span id="status-text">Connecting…</span>
+                </div>
+            </header>
+
+            <div
+                id="note"
+                class="mb-4 hidden rounded-lg border border-sky-700/50 bg-sky-900/30 px-3 py-2 text-sm text-sky-200 light:border-sky-300 light:bg-sky-100 light:text-sky-800"
+            ></div>
+
+            <!-- View: name entry (shown when no session) -->
+            <section id="view-name" class="hidden flex-1 flex-col gap-4">
+                <p class="text-sm text-zinc-300 light:text-zinc-700">
+                    Enter your name. An admin will admit you.
+                </p>
+                <form id="name-form" class="flex flex-col gap-3">
+                    <input
+                        id="name-input"
+                        type="text"
+                        required
+                        maxlength="64"
+                        placeholder="Your name"
+                        autocomplete="off"
+                        autocorrect="off"
+                        autocapitalize="words"
+                        spellcheck="false"
+                        class="rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-base focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 light:border-zinc-300 light:bg-white"
+                    />
+                    <button
+                        id="name-submit"
+                        type="submit"
+                        class="rounded-xl border border-emerald-700/50 bg-emerald-900/30 px-4 py-4 text-base font-semibold text-emerald-200 hover:bg-emerald-900/60 disabled:cursor-progress disabled:opacity-50 light:border-emerald-300 light:bg-emerald-100 light:text-emerald-800 light:hover:bg-emerald-200"
+                    >
+                        Request session
+                    </button>
+                </form>
+                <p
+                    id="name-error"
+                    class="hidden text-sm text-red-400 light:text-red-600"
+                ></p>
+            </section>
+
+            <!-- View: waiting (pending_admit / idle / available / delivered_pending_ack) -->
+            <section
+                id="view-wait"
+                class="hidden flex-1 flex-col items-center justify-center text-center"
+            >
+                <div id="wait-icon" class="mb-3 text-6xl">⌛</div>
+                <h2 id="wait-title" class="mb-1 text-2xl font-bold">
+                    Waiting…
+                </h2>
+                <p
+                    id="wait-sub"
+                    class="mb-6 text-sm text-zinc-400 light:text-zinc-500"
+                ></p>
+                <button
+                    id="wait-primary"
+                    type="button"
+                    class="hidden w-full rounded-xl border border-emerald-700/50 bg-emerald-900/30 px-4 py-4 text-base font-semibold text-emerald-200 hover:bg-emerald-900/60 disabled:cursor-progress disabled:opacity-50 light:border-emerald-300 light:bg-emerald-100 light:text-emerald-800 light:hover:bg-emerald-200"
+                ></button>
+                <button
+                    id="wait-secondary"
+                    type="button"
+                    class="mt-3 hidden w-full rounded-xl border border-zinc-700 bg-zinc-800/60 px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:cursor-progress disabled:opacity-50 light:border-zinc-300 light:bg-zinc-100 light:text-zinc-700 light:hover:bg-zinc-200"
+                ></button>
+            </section>
+
+            <!-- View: busy with assignment -->
+            <section id="view-busy" class="hidden flex-1 flex-col">
+                <div
+                    id="first-solve-banner"
+                    class="mb-3 hidden rounded-xl border border-amber-400 bg-amber-300/20 px-4 py-3 text-center text-base font-bold text-amber-200 light:bg-amber-100 light:text-amber-800"
+                >
+                    🎉 FIRST SOLVE — Bring it now!
+                </div>
+                <div
+                    class="mb-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5 light:border-zinc-200 light:bg-white"
+                >
+                    <div class="mb-4 flex items-center gap-4">
+                        <div
+                            id="busy-ball"
+                            class="flex h-20 w-20 shrink-0 items-center justify-center rounded-full text-3xl font-bold text-white shadow ring-1 ring-black/20"
+                        >
+                            ?
+                        </div>
+                        <div class="min-w-0">
+                            <div
+                                class="text-xs uppercase tracking-wider text-zinc-500 light:text-zinc-400"
+                            >
+                                Problem
+                            </div>
+                            <div
+                                id="busy-problem"
+                                class="text-xl font-bold"
+                            >
+                                —
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-1 text-xs uppercase tracking-wider text-zinc-500 light:text-zinc-400">
+                        Team
+                    </div>
+                    <div id="busy-team" class="mb-3 text-lg font-semibold">
+                        —
+                    </div>
+                    <div class="mb-1 text-xs uppercase tracking-wider text-zinc-500 light:text-zinc-400">
+                        Location
+                    </div>
+                    <div id="busy-location" class="text-lg font-semibold">
+                        —
+                    </div>
+                </div>
+                <button
+                    id="busy-deliver"
+                    type="button"
+                    class="w-full rounded-xl border border-emerald-700/50 bg-emerald-900/30 px-4 py-5 text-lg font-bold text-emerald-200 hover:bg-emerald-900/60 disabled:cursor-progress disabled:opacity-50 light:border-emerald-300 light:bg-emerald-100 light:text-emerald-800 light:hover:bg-emerald-200"
+                >
+                    ✅ Delivered
+                </button>
+            </section>
+
+            <!-- View: rejected -->
+            <section
+                id="view-rejected"
+                class="hidden flex-1 flex-col items-center justify-center text-center"
+            >
+                <div class="mb-3 text-6xl">⛔</div>
+                <h2 class="mb-2 text-2xl font-bold">Session not approved</h2>
+                <p class="text-sm text-zinc-400 light:text-zinc-500">
+                    Speak with an admin or request a new session.
+                </p>
+                <button
+                    id="rejected-restart"
+                    type="button"
+                    class="mt-6 w-full rounded-xl border border-zinc-700 bg-zinc-800/60 px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-zinc-800 light:border-zinc-300 light:bg-zinc-100 light:text-zinc-700 light:hover:bg-zinc-200"
+                >
+                    Try again
+                </button>
+            </section>
+        </main>
+
+        <script type="module" src="/dist/runner.js"></script>
+    </body>
+</html>

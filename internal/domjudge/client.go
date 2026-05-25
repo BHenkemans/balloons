@@ -57,6 +57,8 @@ func (c *Client) ListBalloons(ctx context.Context) ([]Balloon, error) {
 type Team struct {
 	ID       string   `json:"id"`
 	GroupIDs []string `json:"group_ids"`
+	// Optional. DOMjudge returns null when teams are unlocated.
+	Location string `json:"location"`
 }
 
 func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
