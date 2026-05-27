@@ -78,7 +78,7 @@ func (p *IPP) render(ctx context.Context, t Ticket) (string, error) {
 	out := filepath.Join(os.TempDir(), fmt.Sprintf("balloon-%d-%d.pdf", t.BalloonID, time.Now().UnixNano()))
 	args := []string{"compile"}
 	args = append(args, typstInputs(t)...)
-	args = append(args, "--input", "theme=color", p.template, out)
+	args = append(args, p.template, out)
 	cmd := exec.CommandContext(ctx, "typst", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

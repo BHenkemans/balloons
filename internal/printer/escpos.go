@@ -108,7 +108,6 @@ func (p *ESCPOS) render(ctx context.Context, t Ticket) (string, error) {
 	}
 	args = append(args, typstInputs(t)...)
 	args = append(args,
-		"--input", "theme=thermal",
 		"--input", "page_width_mm="+strconv.FormatFloat(pageWidthMM, 'f', 3, 64),
 		p.template, out,
 	)

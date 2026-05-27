@@ -11,7 +11,6 @@ import (
 type Ticket struct {
 	BalloonID    int64
 	ProblemLabel string
-	ProblemRGB   string
 	TeamName     string
 	TeamID       string
 	FirstSolve   bool

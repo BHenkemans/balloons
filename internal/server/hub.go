@@ -332,7 +332,6 @@ func (h *Hub) ticketFor(b *balloonsv1.Balloon, snap snapshot) printer.Ticket {
 	return printer.Ticket{
 		BalloonID:    b.Id,
 		ProblemLabel: b.ProblemLabel,
-		ProblemRGB:   b.ProblemRgb,
 		TeamName:     b.TeamName,
 		TeamID:       dj.TeamID,
 		FirstSolve:   b.FirstSolve,

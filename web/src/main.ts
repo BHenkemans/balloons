@@ -68,18 +68,22 @@ function setStatus(s: Status) {
   }[s];
 }
 
+function makeBalloonCircle(b: Balloon, size: "sm" | "md"): HTMLElement {
+  const sizeClass = size === "sm" ? "h-8 w-8 text-xs" : "h-10 w-10";
+  const ball = document.createElement("div");
+  ball.className = `flex ${sizeClass} shrink-0 items-center justify-center rounded-full font-bold text-white shadow ring-1 ring-black/20`;
+  ball.style.background = b.problemRgb || "#888";
+  ball.textContent = b.problemLabel || "?";
+  return ball;
+}
+
 function row(b: Balloon): HTMLElement {
   const card = document.createElement("div");
   card.className =
     "flex items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3 light:border-zinc-200 light:bg-white";
   if (b.done) card.classList.add("opacity-60");
 
-  const ball = document.createElement("div");
-  ball.className =
-    "flex h-10 w-10 shrink-0 items-center justify-center rounded-full font-bold text-white shadow ring-1 ring-black/20";
-  ball.style.background = b.problemRgb || "#888";
-  ball.textContent = b.problemLabel || "?";
-  card.appendChild(ball);
+  card.appendChild(makeBalloonCircle(b, "md"));
 
   const meta = document.createElement("div");
   meta.className = "min-w-0 flex-1";
@@ -171,12 +175,10 @@ function parseScan(raw: string): string | null {
   if (!s) return null;
   if (/^\d+$/.test(s)) return s;
   try {
-    const u = new URL(s);
-    const id = u.searchParams.get("id");
+    const id = new URL(s, "http://x").searchParams.get("id");
     if (id && /^\d+$/.test(id)) return id;
   } catch {}
-  const m = s.match(/[?&]id=(\d+)/);
-  return m ? m[1] : null;
+  return null;
 }
 
 function flashHint(msg: string, kind: "ok" | "err") {
@@ -187,18 +189,17 @@ function flashHint(msg: string, kind: "ok" | "err") {
 }
 
 const UNDO_MS = 4000;
+const pendingDeliveries = new Set<string>();
 
 function showDeliverToast(b: Balloon) {
+  const idStr = b.id.toString();
+  if (pendingDeliveries.has(idStr)) return;
+  pendingDeliveries.add(idStr);
+
   const toast = document.createElement("div");
   toast.className =
     "flex items-start gap-3 rounded-lg border border-emerald-700/50 bg-emerald-950/90 px-4 py-3 text-sm text-emerald-100 shadow-lg backdrop-blur light:border-emerald-300 light:bg-emerald-50 light:text-emerald-900";
-
-  const ball = document.createElement("div");
-  ball.className =
-    "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow ring-1 ring-black/20";
-  ball.style.background = b.problemRgb || "#888";
-  ball.textContent = b.problemLabel || "?";
-  toast.appendChild(ball);
+  toast.appendChild(makeBalloonCircle(b, "sm"));
 
   const body = document.createElement("div");
   body.className = "min-w-0 flex-1";
@@ -216,39 +217,45 @@ function showDeliverToast(b: Balloon) {
   cancelBtn.type = "button";
   cancelBtn.className =
     "shrink-0 rounded-md border border-emerald-700 bg-emerald-900/40 px-2 py-1 text-xs font-medium hover:bg-emerald-900/70 light:border-emerald-400 light:bg-white light:text-emerald-800 light:hover:bg-emerald-100";
-  cancelBtn.textContent = `Cancel (${Math.ceil(UNDO_MS / 1000)}s)`;
   toast.appendChild(cancelBtn);
-
   toastStack.appendChild(toast);
 
-  let cancelled = false;
   const startedAt = Date.now();
-  const tick = window.setInterval(() => {
-    const remaining = UNDO_MS - (Date.now() - startedAt);
-    if (remaining <= 0) {
-      window.clearInterval(tick);
-      return;
-    }
+  const updateLabel = () => {
+    const remaining = Math.max(0, UNDO_MS - (Date.now() - startedAt));
     cancelBtn.textContent = `Cancel (${Math.ceil(remaining / 1000)}s)`;
-  }, 200);
+  };
+  updateLabel();
+  const tick = window.setInterval(updateLabel, 200);
 
-  cancelBtn.onclick = () => {
-    cancelled = true;
+  const finish = () => {
     window.clearInterval(tick);
+    window.clearTimeout(commit);
+    pendingDeliveries.delete(idStr);
     toast.remove();
-    flashHint(`Cancelled ${b.teamName}`, "err");
   };
 
-  window.setTimeout(async () => {
+  cancelBtn.onclick = () => {
+    finish();
+    flashHint(`Cancelled ${b.teamName}`, "ok");
+  };
+
+  const commit = window.setTimeout(async () => {
     window.clearInterval(tick);
-    if (cancelled) return;
+    // Stream may have flipped the balloon to done while we waited (another
+    // runner, another tab) — don't fire a redundant MarkDone.
+    if (state.get(idStr)?.done) {
+      finish();
+      return;
+    }
     cancelBtn.disabled = true;
     cancelBtn.textContent = "delivering…";
     try {
       await client.markDone({ balloonId: b.id });
-      toast.remove();
+      finish();
     } catch (err) {
       console.error("markDone:", err);
+      pendingDeliveries.delete(idStr);
       cancelBtn.disabled = false;
       cancelBtn.textContent = "retry";
       cancelBtn.onclick = () => {
@@ -284,11 +291,14 @@ scanForm.addEventListener("submit", (e) => {
   handleScan(v);
 });
 
-// Keep the scan field focused so hand scanners (which act as keyboards)
-// always land in the right place. Buttons still receive clicks because the
-// click fires before the refocus runs.
+// Hand scanners act as keyboards, so the scan input has to stay focused —
+// but don't steal focus from interactive elements (buttons, other inputs),
+// otherwise tabbing and clicks land somewhere the user didn't intend.
 function focusScan() {
-  if (document.activeElement !== scanInput) scanInput.focus();
+  const a = document.activeElement;
+  if (a === scanInput) return;
+  if (a && a !== document.body) return;
+  scanInput.focus();
 }
 focusScan();
 scanInput.addEventListener("blur", () => {
