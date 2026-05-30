@@ -1,4 +1,4 @@
-#import "@preview/zebra:0.1.0": qrcode
+#import "@preview/tiaoma:0.3.0": code128
 
 // --- Inputs ---
 #let date-time = sys.inputs.at("datetime", default: "14-02-2026 10:00")
@@ -26,11 +26,6 @@
   fill: black,
 )
 
-// Thermal output is unforgiving — Typst's default paragraph and block
-// spacing stacks up to several centimetres of invisible gaps over a long
-// receipt. Zero everything out and use explicit `#v(...)` for breathing
-// room. Has to be a document-level show rule: a top-level `set par/block`
-// inside an `#if` would only apply within that block.
 #show: body => {
   set par(spacing: 0pt, leading: 0.5em)
   set block(above: 0pt, below: 0pt)
@@ -151,11 +146,8 @@
 
   #if scan-url != "" [
     #v(2mm)
-    #qrcode(
-      scan-url,
-      width: 50mm,
-      quiet-zone: true,
-      options: (ec-level: "h"),
+    #code128(
+      ticket-id,
     )
     #v(1mm)
     #text(size: 8pt, weight: "regular")[Scan to mark delivered]
