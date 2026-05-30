@@ -1,17 +1,13 @@
 package printer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/phin1x/go-ipp"
 )
@@ -59,7 +55,7 @@ func NewIPP(uri, template string) (*IPP, error) {
 }
 
 func (p *IPP) Print(ctx context.Context, t Ticket) error {
-	pdf, err := p.render(ctx, t)
+	pdf, err := renderTypst(ctx, t, typstOpts{template: p.template, ext: "pdf"})
 	if err != nil {
 		return err
 	}
@@ -72,19 +68,4 @@ func (p *IPP) Print(ctx context.Context, t Ticket) error {
 		return fmt.Errorf("printer: IPP submit: %w", err)
 	}
 	return nil
-}
-
-func (p *IPP) render(ctx context.Context, t Ticket) (string, error) {
-	out := filepath.Join(os.TempDir(), fmt.Sprintf("balloon-%d-%d.pdf", t.BalloonID, time.Now().UnixNano()))
-	args := []string{"compile"}
-	args = append(args, typstInputs(t)...)
-	args = append(args, p.template, out)
-	cmd := exec.CommandContext(ctx, "typst", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(out)
-		return "", fmt.Errorf("printer: typst compile: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return out, nil
 }

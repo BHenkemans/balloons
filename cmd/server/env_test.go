@@ -1,4 +1,4 @@
-package config
+package main
 
 import (
 	"reflect"
@@ -23,11 +23,9 @@ func TestParseCSV(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ParseCSV(tc.in)
-			// reflect.DeepEqual treats nil and []string{} as different — we
-			// want exact behavior here because the package documents nil.
+			got := parseCSV(tc.in)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("ParseCSV(%q) = %#v, want %#v", tc.in, got, tc.want)
+				t.Fatalf("parseCSV(%q) = %#v, want %#v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -36,11 +34,11 @@ func TestParseCSV(t *testing.T) {
 func TestGetenv(t *testing.T) {
 	const key = "BALLOONS_CONFIG_TEST_KEY"
 	t.Setenv(key, "")
-	if got := Getenv(key, "fallback"); got != "fallback" {
-		t.Fatalf("Getenv unset: got %q, want fallback", got)
+	if got := getenv(key, "fallback"); got != "fallback" {
+		t.Fatalf("getenv unset: got %q, want fallback", got)
 	}
 	t.Setenv(key, "explicit")
-	if got := Getenv(key, "fallback"); got != "explicit" {
-		t.Fatalf("Getenv set: got %q, want explicit", got)
+	if got := getenv(key, "fallback"); got != "explicit" {
+		t.Fatalf("getenv set: got %q, want explicit", got)
 	}
 }

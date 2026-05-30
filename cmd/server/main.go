@@ -8,60 +8,79 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/BHenkemans/balloons/gen/balloons/v1/balloonsv1connect"
-	"github.com/BHenkemans/balloons/internal/config"
 	"github.com/BHenkemans/balloons/internal/domjudge"
 	"github.com/BHenkemans/balloons/internal/printer"
 	"github.com/BHenkemans/balloons/internal/server"
 	"github.com/BHenkemans/balloons/internal/state"
 )
 
+// config holds every value read from the process environment. Built once at
+// startup by loadConfig; consumed by main().
+type config struct {
+	addr        string
+	dj          *domjudge.Client
+	stateDB     string
+	hideGroups  []string
+	noFSGroups  []string
+	scanBaseURL string
+	loc         *time.Location
+}
+
+func loadConfig() (config, error) {
+	addr := getenv("ADDR", ":8080")
+
+	loc, err := resolveTZ(os.Getenv("CONTEST_TZ"))
+	if err != nil {
+		return config{}, err
+	}
+
+	return config{
+		addr: addr,
+		dj: domjudge.New(
+			mustEnv("DOMJUDGE_URL"),
+			mustEnv("DOMJUDGE_USER"),
+			mustEnv("DOMJUDGE_PASS"),
+			mustEnv("DOMJUDGE_CONTEST_ID"),
+		),
+		stateDB:     getenv("STATE_DB", "balloons.db"),
+		hideGroups:  parseCSV(os.Getenv("HIDE_GROUP_IDS")),
+		noFSGroups:  parseCSV(os.Getenv("NO_FIRST_SOLVE_GROUP_IDS")),
+		scanBaseURL: resolveScanBaseURL(os.Getenv("SCAN_BASE_URL"), addr),
+		loc:         loc,
+	}, nil
+}
+
 func main() {
-	dj := domjudge.New(
-		mustEnv("DOMJUDGE_URL"),
-		mustEnv("DOMJUDGE_USER"),
-		mustEnv("DOMJUDGE_PASS"),
-		mustEnv("DOMJUDGE_CONTEST_ID"),
-	)
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("scan base URL: %s", cfg.scanBaseURL)
+	log.Printf("ticket timezone: %s", cfg.loc)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	p, err := buildPrinter()
+	p, err := printer.FromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	store, err := state.Open(config.Getenv("STATE_DB", "balloons.db"))
+	store, err := state.Open(cfg.stateDB)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer store.Close()
 
-	addr := config.Getenv("ADDR", ":8080")
-	scanBaseURL := resolveScanBaseURL(os.Getenv("SCAN_BASE_URL"), addr)
-	log.Printf("scan base URL: %s", scanBaseURL)
-
-	loc, err := resolveTZ(os.Getenv("CONTEST_TZ"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("ticket timezone: %s", loc)
-
-	hub := server.NewHub(dj, p, store,
-		config.ParseCSV(os.Getenv("HIDE_GROUP_IDS")),
-		config.ParseCSV(os.Getenv("NO_FIRST_SOLVE_GROUP_IDS")),
-		scanBaseURL,
-		loc,
-	)
+	hub := server.NewHub(cfg.dj, p, store, cfg.hideGroups, cfg.noFSGroups, cfg.scanBaseURL, cfg.loc)
 	go hub.Run(ctx)
 
-	svc := &server.Server{Hub: hub, DJ: dj, Store: store}
+	svc := &server.Server{Hub: hub, DJ: cfg.dj, Store: store}
 	path, handler := balloonsv1connect.NewBalloonServiceHandler(svc)
 
 	mux := http.NewServeMux()
@@ -71,7 +90,7 @@ func main() {
 	})
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Addr: cfg.addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -79,7 +98,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("listening on %s, mounted %s", addr, path)
+	log.Printf("listening on %s, mounted %s", cfg.addr, path)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -115,7 +134,6 @@ func resolveScanBaseURL(env, addr string) string {
 	if err != nil || host == "" {
 		host = "localhost"
 	}
-	// addr is in `:port` or `host:port` form; we want the port suffix.
 	portSuffix := addr
 	if i := strings.LastIndex(addr, ":"); i >= 0 {
 		portSuffix = addr[i:]
@@ -133,34 +151,26 @@ func mustEnv(k string) string {
 	return v
 }
 
-func buildPrinter() (printer.Printer, error) {
-	kind := config.Getenv("PRINTER_KIND", "noop")
-	switch kind {
-	case "noop":
-		return printer.Noop{}, nil
-	case "ipp":
-		uri := os.Getenv("PRINTER_IPP_URI")
-		if uri == "" {
-			return nil, fmt.Errorf("PRINTER_KIND=ipp requires PRINTER_IPP_URI")
-		}
-		template := config.Getenv("PRINTER_TEMPLATE", "templates/balloon.typ")
-		return printer.NewIPP(uri, template)
-	case "escpos":
-		addr := os.Getenv("PRINTER_ESCPOS_ADDR")
-		if addr == "" {
-			return nil, fmt.Errorf("PRINTER_KIND=escpos requires PRINTER_ESCPOS_ADDR (host:port)")
-		}
-		template := config.Getenv("PRINTER_TEMPLATE", "templates/balloon.typ")
-		width := 576
-		if v := os.Getenv("PRINTER_ESCPOS_WIDTH"); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil || n <= 0 {
-				return nil, fmt.Errorf("PRINTER_ESCPOS_WIDTH must be a positive integer, got %q", v)
-			}
-			width = n
-		}
-		return printer.NewESCPOS(addr, template, width)
-	default:
-		return nil, fmt.Errorf("unknown PRINTER_KIND %q (want noop, ipp, or escpos)", kind)
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
 	}
+	return def
+}
+
+// parseCSV splits a comma-separated env-var value into a slice, trimming
+// whitespace around each entry and dropping empties. Returns nil for an empty
+// input so callers can range over it without a length check.
+func parseCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

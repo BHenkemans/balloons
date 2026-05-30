@@ -9,10 +9,7 @@ import (
 	"math"
 	"net"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -98,27 +95,16 @@ func (p *ESCPOS) Print(ctx context.Context, t Ticket) error {
 // dot width / targetDPI so the rendered pixel grid lines up with printer
 // dots after downsampling.
 func (p *ESCPOS) render(ctx context.Context, t Ticket) (string, error) {
-	out := filepath.Join(os.TempDir(), fmt.Sprintf("balloon-%d-%d.png", t.BalloonID, time.Now().UnixNano()))
 	pageWidthMM := float64(p.width) * 25.4 / targetDPI
-	ppi := targetDPI * float64(supersample)
-	args := []string{
-		"compile",
-		"--format", "png",
-		"--ppi", strconv.FormatFloat(ppi, 'f', 3, 64),
-	}
-	args = append(args, typstInputs(t)...)
-	args = append(args,
-		"--input", "page_width_mm="+strconv.FormatFloat(pageWidthMM, 'f', 3, 64),
-		p.template, out,
-	)
-	cmd := exec.CommandContext(ctx, "typst", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(out)
-		return "", fmt.Errorf("printer: typst compile: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return out, nil
+	return renderTypst(ctx, t, typstOpts{
+		template: p.template,
+		ext:      "png",
+		format:   "png",
+		ppi:      targetDPI * float64(supersample),
+		extra: []string{
+			"--input", "page_width_mm=" + strconv.FormatFloat(pageWidthMM, 'f', 3, 64),
+		},
+	})
 }
 
 func loadImage(path string) (image.Image, error) {
