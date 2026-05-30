@@ -57,11 +57,6 @@ build-server:
 # Build everything for release.
 build: build-web build-server
 
-# Smoke-test the running server's ListBalloons endpoint.
-ping:
-    curl -sfX POST http://localhost:8080/balloons.v1.BalloonService/ListBalloons \
-      -H "Content-Type: application/json" -d '{}' | head -c 400; echo
-
 # Delete generated and built artifacts.
 clean:
     rm -rf gen web/src/gen web/dist bin

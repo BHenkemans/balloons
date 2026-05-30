@@ -33,6 +33,7 @@ func New(baseURL, user, pass, contestID string) *Client {
 
 type Balloon struct {
 	BalloonID      int64          `json:"balloonid"`
+	Time           string         `json:"time"`
 	ContestProblem ContestProblem `json:"contestproblem"`
 	Team           string         `json:"team"`
 	TeamID         string         `json:"teamid"`
@@ -45,11 +46,6 @@ type ContestProblem struct {
 	RGB   string `json:"rgb"`
 }
 
-type Award struct {
-	ID      string   `json:"id"`
-	TeamIDs []string `json:"team_ids"`
-}
-
 func (c *Client) ListBalloons(ctx context.Context) ([]Balloon, error) {
 	var out []Balloon
 	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/balloons", url.PathEscape(c.contestID)), &out); err != nil {
@@ -58,10 +54,47 @@ func (c *Client) ListBalloons(ctx context.Context) ([]Balloon, error) {
 	return out, nil
 }
 
-func (c *Client) ListAwards(ctx context.Context) ([]Award, error) {
-	var out []Award
-	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/awards", url.PathEscape(c.contestID)), &out); err != nil {
+type Team struct {
+	ID       string   `json:"id"`
+	GroupIDs []string `json:"group_ids"`
+}
+
+func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
+	var out []Team
+	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/teams", url.PathEscape(c.contestID)), &out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// ListProblems returns the subset of /contests/{cid}/problems we care about.
+// Reuses the ContestProblem shape (same ID/Label/RGB fields as the embedded
+// problem inside a Balloon).
+func (c *Client) ListProblems(ctx context.Context) ([]ContestProblem, error) {
+	var out []ContestProblem
+	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/problems", url.PathEscape(c.contestID)), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// State mirrors the relevant fields of DOMjudge's /contests/{cid}/state. Each
+// field is a CLICS timestamp string when the event has occurred, or null
+// otherwise — so we treat them as *string.
+type State struct {
+	Frozen *string `json:"frozen"`
+	Thawed *string `json:"thawed"`
+}
+
+// Frozen reports whether the contest's scoreboard freeze is currently active.
+func (s State) FrozenNow() bool {
+	return s.Frozen != nil && s.Thawed == nil
+}
+
+func (c *Client) GetState(ctx context.Context) (State, error) {
+	var out State
+	if err := c.get(ctx, fmt.Sprintf("/api/v4/contests/%s/state", url.PathEscape(c.contestID)), &out); err != nil {
+		return State{}, err
 	}
 	return out, nil
 }

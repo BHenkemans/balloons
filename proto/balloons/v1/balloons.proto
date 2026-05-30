@@ -2,12 +2,13 @@ syntax = "proto3";
 
 package balloons.v1;
 
-option go_package = "github.com/BHenkemans/balloons/gen/balloons/v1;balloonsv1";
+option go_package = "github.com/GEHACK/balloons/gen/balloons/v1;balloonsv1";
 
 service BalloonService {
   rpc ListBalloons(ListBalloonsRequest) returns (ListBalloonsResponse) {}
   rpc StreamBalloons(StreamBalloonsRequest) returns (stream StreamBalloonsResponse) {}
   rpc MarkDone(MarkDoneRequest) returns (MarkDoneResponse) {}
+  rpc Reprint(ReprintRequest) returns (ReprintResponse) {}
 }
 
 message Balloon {
@@ -32,9 +33,11 @@ message StreamBalloonsResponse {
     KIND_UNSPECIFIED = 0;
     KIND_ADDED = 1;
     KIND_UPDATED = 2;
+    KIND_FREEZE = 3;
   }
   Kind kind = 1;
   Balloon balloon = 2;
+  bool frozen = 3;
 }
 
 message MarkDoneRequest {
@@ -42,3 +45,9 @@ message MarkDoneRequest {
 }
 
 message MarkDoneResponse {}
+
+message ReprintRequest {
+  int64 balloon_id = 1;
+}
+
+message ReprintResponse {}

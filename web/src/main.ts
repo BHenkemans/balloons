@@ -1,7 +1,12 @@
 import { createClient } from "@connectrpc/connect";
 import { createConnectTransport } from "@connectrpc/connect-web";
-import { BalloonService } from "./gen/balloons/v1/balloons_pb.js";
+import {
+  BalloonService,
+  StreamBalloonsResponse_Kind,
+} from "./gen/balloons/v1/balloons_pb.js";
 import type { Balloon } from "./gen/balloons/v1/balloons_pb.js";
+import { row } from "./render.js";
+import { initScan } from "./scan.js";
 
 const transport = createConnectTransport({ baseUrl: window.location.origin });
 const client = createClient(BalloonService, transport);
@@ -14,73 +19,55 @@ const deliveredEmptyEl = document.getElementById("delivered-empty")!;
 const deliveredCountEl = document.getElementById("delivered-count")!;
 const statusDot = document.getElementById("status-dot")!;
 const statusText = document.getElementById("status-text")!;
+const freezeBanner = document.getElementById("freeze-banner")!;
+const themeToggle = document.getElementById("theme-toggle")!;
+const themeToggleIcon = document.getElementById("theme-toggle-icon")!;
+const scanForm = document.getElementById("scan-form") as HTMLFormElement;
+const scanInput = document.getElementById("scan-input") as HTMLInputElement;
+const scanHint = document.getElementById("scan-hint")!;
+const toastStack = document.getElementById("toast-stack")!;
 
 const state = new Map<string, Balloon>();
 
+function applyTheme(theme: "light" | "dark") {
+  document.documentElement.classList.toggle("light", theme === "light");
+  themeToggleIcon.textContent = theme === "light" ? "🌙" : "☀️";
+}
+
+applyTheme(
+  (() => {
+    try {
+      return localStorage.getItem("theme") === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  })(),
+);
+
+themeToggle.onclick = () => {
+  const next = document.documentElement.classList.contains("light")
+    ? "dark"
+    : "light";
+  try {
+    localStorage.setItem("theme", next);
+  } catch {}
+  applyTheme(next);
+};
+
 type Status = "connecting" | "connected" | "disconnected";
 function setStatus(s: Status) {
-  statusDot.className = "h-2 w-2 rounded-full " + {
-    connecting: "bg-amber-400 animate-pulse",
-    connected: "bg-emerald-500",
-    disconnected: "bg-red-500",
-  }[s];
+  statusDot.className =
+    "h-2 w-2 rounded-full " +
+    {
+      connecting: "bg-amber-400 animate-pulse",
+      connected: "bg-emerald-500",
+      disconnected: "bg-red-500",
+    }[s];
   statusText.textContent = {
     connecting: "Connecting…",
     connected: "Connected",
     disconnected: "Disconnected",
   }[s];
-}
-
-function row(b: Balloon, withButton: boolean): HTMLElement {
-  const card = document.createElement("div");
-  card.className =
-    "flex items-center gap-4 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-3";
-  if (!withButton) card.classList.add("opacity-60");
-
-  const ball = document.createElement("div");
-  ball.className =
-    "flex h-10 w-10 shrink-0 items-center justify-center rounded-full font-bold text-white shadow ring-1 ring-black/20";
-  ball.style.background = b.problemRgb || "#888";
-  ball.textContent = b.problemLabel || "?";
-  card.appendChild(ball);
-
-  const meta = document.createElement("div");
-  meta.className = "min-w-0 flex-1";
-
-  const team = document.createElement("div");
-  team.className = "truncate font-semibold";
-  team.textContent = b.teamName;
-  meta.appendChild(team);
-
-  if (b.firstSolve) {
-    const sub = document.createElement("div");
-    sub.className = "text-sm text-zinc-400";
-    sub.textContent = `First team to solve problem ${b.problemLabel}!`;
-    meta.appendChild(sub);
-  }
-
-  card.appendChild(meta);
-
-  if (withButton) {
-    const btn = document.createElement("button");
-    btn.className =
-      "shrink-0 rounded-md border border-emerald-700/50 bg-emerald-900/30 px-3 py-1.5 text-sm font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:cursor-progress disabled:opacity-60";
-    btn.textContent = "Deliver";
-    btn.onclick = async () => {
-      btn.disabled = true;
-      btn.textContent = "delivering…";
-      try {
-        await client.markDone({ balloonId: b.id });
-      } catch (err) {
-        console.error("markDone:", err);
-        btn.disabled = false;
-        btn.textContent = "Deliver";
-      }
-    };
-    card.appendChild(btn);
-  }
-
-  return card;
 }
 
 function render() {
@@ -93,17 +80,23 @@ function render() {
   deliveredCountEl.textContent = `(${delivered.length})`;
 
   pendingEl.innerHTML = "";
-  for (const b of pending) pendingEl.appendChild(row(b, true));
+  for (const b of pending) pendingEl.appendChild(row(b, client));
   pendingEmptyEl.classList.toggle("hidden", pending.length !== 0);
 
   deliveredEl.innerHTML = "";
-  for (const b of delivered) deliveredEl.appendChild(row(b, false));
+  for (const b of delivered) deliveredEl.appendChild(row(b, client));
   deliveredEmptyEl.classList.toggle("hidden", delivered.length !== 0);
 }
+
+initScan({ state, client, scanForm, scanInput, scanHint, toastStack });
 
 async function stream() {
   for await (const ev of client.streamBalloons({})) {
     setStatus("connected");
+    if (ev.kind === StreamBalloonsResponse_Kind.FREEZE) {
+      freezeBanner.classList.toggle("hidden", !ev.frozen);
+      continue;
+    }
     if (!ev.balloon) continue;
     state.set(ev.balloon.id.toString(), ev.balloon);
     render();

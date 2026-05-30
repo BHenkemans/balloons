@@ -2,22 +2,22 @@ package server
 
 import (
 	"context"
-	"regexp"
-	"strings"
+	"errors"
+	"log"
 
 	"connectrpc.com/connect"
 
-	balloonsv1 "github.com/BHenkemans/balloons/gen/balloons/v1"
-	"github.com/BHenkemans/balloons/gen/balloons/v1/balloonsv1connect"
-	"github.com/BHenkemans/balloons/internal/domjudge"
+	balloonsv1 "github.com/GEHACK/balloons/gen/balloons/v1"
+	"github.com/GEHACK/balloons/gen/balloons/v1/balloonsv1connect"
+	"github.com/GEHACK/balloons/internal/domjudge"
+	"github.com/GEHACK/balloons/internal/state"
 )
-
-var teamPrefixRE = regexp.MustCompile(`^\S+:\s+`)
 
 type Server struct {
 	balloonsv1connect.UnimplementedBalloonServiceHandler
-	Hub *Hub
-	DJ  *domjudge.Client
+	Hub   *Hub
+	DJ    *domjudge.Client
+	Store *state.Store
 }
 
 func (s *Server) ListBalloons(_ context.Context, _ *connect.Request[balloonsv1.ListBalloonsRequest]) (*connect.Response[balloonsv1.ListBalloonsResponse], error) {
@@ -28,13 +28,34 @@ func (s *Server) MarkDone(ctx context.Context, req *connect.Request[balloonsv1.M
 	if err := s.DJ.MarkDone(ctx, req.Msg.BalloonId); err != nil {
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
+	if err := s.Store.RecordDelivered(req.Msg.BalloonId); err != nil {
+		// Don't fail the RPC — DOMjudge is already updated; just log.
+		log.Printf("markDone: record delivered: %v", err)
+	}
 	s.Hub.TriggerRefresh()
 	return connect.NewResponse(&balloonsv1.MarkDoneResponse{}), nil
 }
 
+func (s *Server) Reprint(_ context.Context, req *connect.Request[balloonsv1.ReprintRequest]) (*connect.Response[balloonsv1.ReprintResponse], error) {
+	if err := s.Hub.Reprint(req.Msg.BalloonId); err != nil {
+		if errors.Is(err, ErrBalloonNotFound) {
+			return nil, connect.NewError(connect.CodeNotFound, err)
+		}
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&balloonsv1.ReprintResponse{}), nil
+}
+
 func (s *Server) StreamBalloons(ctx context.Context, _ *connect.Request[balloonsv1.StreamBalloonsRequest], stream *connect.ServerStream[balloonsv1.StreamBalloonsResponse]) error {
-	snap, ch, unsub := s.Hub.Subscribe()
+	snap, frozen, ch, unsub := s.Hub.Subscribe()
 	defer unsub()
+
+	if err := stream.Send(&balloonsv1.StreamBalloonsResponse{
+		Kind:   balloonsv1.StreamBalloonsResponse_KIND_FREEZE,
+		Frozen: frozen,
+	}); err != nil {
+		return err
+	}
 
 	for _, b := range snap {
 		if err := stream.Send(&balloonsv1.StreamBalloonsResponse{
@@ -57,31 +78,5 @@ func (s *Server) StreamBalloons(ctx context.Context, _ *connect.Request[balloons
 				return err
 			}
 		}
-	}
-}
-
-func buildFirstSolveSet(awards []domjudge.Award) map[string]bool {
-	out := map[string]bool{}
-	const prefix = "first-to-solve-"
-	for _, a := range awards {
-		if !strings.HasPrefix(a.ID, prefix) {
-			continue
-		}
-		problemID := strings.TrimPrefix(a.ID, prefix)
-		for _, tid := range a.TeamIDs {
-			out[problemID+"|"+tid] = true
-		}
-	}
-	return out
-}
-
-func toProto(b domjudge.Balloon, firstSolve map[string]bool) *balloonsv1.Balloon {
-	return &balloonsv1.Balloon{
-		Id:           b.BalloonID,
-		ProblemLabel: b.ContestProblem.Label,
-		ProblemRgb:   b.ContestProblem.RGB,
-		TeamName:     teamPrefixRE.ReplaceAllString(b.Team, ""),
-		Done:         b.Done,
-		FirstSolve:   firstSolve[b.ContestProblem.ID+"|"+b.TeamID],
 	}
 }

@@ -17,5 +17,15 @@ pkgs.mkShell {
 
     # Frontend build (esbuild via npm)
     nodejs_22
+
+    # Ticket rendering (printer subsystem)
+    typst
   ];
+
+  shellHook = ''
+    if [ -z "$IN_NIX_ZSH" ] && [ -x "$(command -v zsh)" ]; then
+      export IN_NIX_ZSH=1
+      exec zsh
+    fi
+  '';
 }
