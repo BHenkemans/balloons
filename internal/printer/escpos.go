@@ -18,10 +18,9 @@ import (
 //
 // The render pipeline supersamples the Typst output (so each printer dot is
 // the area-average of supersample² source pixels) and converts the result to
-// 1-bit with a chroma-aware ink density: saturated colors become solid black
-// ink instead of dithering to noise, while grayscale photo regions go through
-// Floyd-Steinberg as usual. This avoids the speckled-blob look that simple
-// dithering produces on colored fills.
+// 1-bit via a luminance threshold with Floyd-Steinberg dithering, which keeps
+// the anti-aliased edges of the template's text and line-art map crisp. The
+// template is pure black-and-white, so no color handling is needed.
 type ESCPOS struct {
 	addr     string // host:port for TCP raw printing
 	template string
@@ -37,12 +36,6 @@ const targetDPI = 203.0
 // Typst's anti-aliasing without quadrupling rasterization cost; 3+ shows
 // diminishing returns on a 203 DPI printer.
 const supersample = 2
-
-// chromaThreshold is the maximum sRGB chroma (max channel - min channel)
-// that a pixel may have before it's treated as "colored ink" and forced to
-// solid black rather than dithered. 0.15 keeps faint anti-aliased edges in
-// the photo path but catches the brand colors used in the template.
-const chromaThreshold = 0.15
 
 // NewESCPOS validates the address and returns a printer. width is the printer
 // head width in dots; 576 fits the common 80mm/203dpi thermal printer.
@@ -167,17 +160,15 @@ func encodeESCPOS(img image.Image, targetWidth int) []byte {
 	return buf.Bytes()
 }
 
-// imageTo1Bit converts img to a 1-bit raster of width targetWidth using a
-// three-stage pipeline: area-filter downsample (the supersample step), per
-// pixel chroma-aware ink density, then Floyd-Steinberg dither on the density
-// field. true = black (printed).
+// imageTo1Bit converts img to a 1-bit raster of width targetWidth in two
+// stages: an area-filter downsample (the supersample step) that produces a
+// per-dot ink density, then Floyd-Steinberg dither on that density field.
+// true = black (printed).
 //
-// The downsample averages in linear-light space so anti-aliased edges and
-// gradients don't get the gamma-darkening artefact of averaging sRGB values
-// directly. Chroma detection keeps the dither pattern off solid colored
-// fills (problem letter, first-solve banner) by snapping them to either
-// solid black or — for very light colors like pale yellow — back to the
-// luminance path.
+// The downsample averages luminance in linear-light space so anti-aliased
+// edges don't get the gamma-darkening artefact of averaging sRGB values
+// directly. The template is black-and-white, so a single luminance channel is
+// all we need.
 func imageTo1Bit(img image.Image, targetWidth int) (pixels []bool, width, height int) {
 	src := img.Bounds()
 	srcW, srcH := src.Dx(), src.Dy()
@@ -212,8 +203,7 @@ func imageTo1Bit(img image.Image, targetWidth int) (pixels []bool, width, height
 				sx1 = sx0 + 1
 			}
 
-			var rLin, gLin, bLin float64
-			var count float64
+			var lumLinear, count float64
 			for y := sy0; y < sy1; y++ {
 				for x := sx0; x < sx1; x++ {
 					r, g, b, a := img.At(src.Min.X+x, src.Min.Y+y).RGBA()
@@ -223,40 +213,16 @@ func imageTo1Bit(img image.Image, targetWidth int) (pixels []bool, width, height
 					sr := float64(r)/65535.0*af + (1 - af)
 					sg := float64(g)/65535.0*af + (1 - af)
 					sb := float64(b)/65535.0*af + (1 - af)
-					rLin += srgbToLinear(sr)
-					gLin += srgbToLinear(sg)
-					bLin += srgbToLinear(sb)
+					// Rec. 709 luminance in linear light.
+					lumLinear += 0.2126*srgbToLinear(sr) + 0.7152*srgbToLinear(sg) + 0.0722*srgbToLinear(sb)
 					count++
 				}
 			}
-			rLin /= count
-			gLin /= count
-			bLin /= count
 
-			// Back to sRGB for chroma; chroma is a perceptual property and
-			// is more meaningful in display space than in linear light.
-			rs := linearToSrgb(rLin)
-			gs := linearToSrgb(gLin)
-			bs := linearToSrgb(bLin)
-			maxC := math.Max(rs, math.Max(gs, bs))
-			minC := math.Min(rs, math.Min(gs, bs))
-			chroma := maxC - minC
-
-			// Perceptual brightness from linear luminance (Rec. 709) lifted
-			// through the sRGB transfer.
-			lumLinear := 0.2126*rLin + 0.7152*gLin + 0.0722*bLin
-			perceived := linearToSrgb(lumLinear)
-
-			var ink float64
-			if chroma > chromaThreshold && perceived < 0.7 {
-				// Saturated, non-pale color → treat as solid ink. Light
-				// colors (pale yellow, pastel pink) fall through to the
-				// luminance path so they don't print as a black blob.
-				ink = 1
-			} else {
-				ink = 1 - perceived
-			}
-			density[oy*width+ox] = ink
+			// Perceived brightness back through the sRGB transfer; ink density
+			// is its complement (dark pixel → more ink).
+			perceived := linearToSrgb(lumLinear / count)
+			density[oy*width+ox] = 1 - perceived
 		}
 	}
 
